@@ -11,8 +11,31 @@
         var $masked = $wrap.find('.acuity-encrypt-masked');
         var $value  = $wrap.find('.acuity-encrypt-value');
         var $btn    = $(this);
+        var keyUrl  = $wrap.data('key-url');
 
         if ($value.is(':hidden')) {
+          // Key backup panel: the raw key is never in the page markup — fetch
+          // it on demand the first time "Reveal key" is clicked.
+          if (keyUrl && !$value.data('loaded')) {
+            $btn.prop('disabled', true);
+            $.getJSON(keyUrl).done(function (response) {
+              if (response && response.key) {
+                $value.text(response.key).data('loaded', true);
+                $masked.attr('aria-hidden', 'true').hide();
+                $value.show();
+                $btn.text(Backdrop.t('Hide'));
+              }
+              else {
+                $value.text(response && response.error ? response.error : Backdrop.t('Could not retrieve key.'));
+              }
+            }).fail(function () {
+              $value.text(Backdrop.t('Could not retrieve key.'));
+            }).always(function () {
+              $btn.prop('disabled', false);
+            });
+            return;
+          }
+
           $masked.attr('aria-hidden', 'true').hide();
           $value.show();
           $btn.text(Backdrop.t('Hide'));

@@ -116,7 +116,11 @@ function acuity_encrypt_decrypt(string $ciphertext): string|false {
 /**
  * Returns TRUE if a value was produced by acuity_encrypt_encrypt().
  *
- * Matches the 'enc{digits}:' prefix, e.g. enc1:, enc2:, enc123:
+ * Checks the 'enc{digits}:' prefix AND that the remainder is valid base64
+ * decoding to at least IV+tag length (28 bytes). A prefix match alone is not
+ * enough: plaintext a user typed that happens to start with "enc1:" must
+ * NOT be mistaken for ciphertext, or it would be skipped by the presave
+ * double-encryption guard and stored unencrypted.
  *
  * @param string $value
  *   The string to test.
@@ -124,7 +128,12 @@ function acuity_encrypt_decrypt(string $ciphertext): string|false {
  * @return bool
  */
 function acuity_encrypt_is_encrypted(string $value): bool {
-  return (bool) preg_match('/^enc\d+:/', $value);
+  if (!preg_match('/^enc\d+:(.+)$/s', $value, $m)) {
+    return FALSE;
+  }
+  $raw = base64_decode($m[1], TRUE);
+  // Minimum valid length: 12 (IV) + 16 (tag) = 28 bytes before ciphertext.
+  return $raw !== FALSE && strlen($raw) >= 28;
 }
 
 /**
@@ -196,6 +205,16 @@ function acuity_encrypt_menu(): array {
     'file'             => 'acuity_encrypt.admin.inc',
     'type'             => MENU_LOCAL_TASK,
     'weight'           => 10,
+  ];
+
+  // AJAX-only: returns the raw active key as JSON, fetched on demand from the
+  // "Reveal key" button so the key never sits in the settings page's markup.
+  $items['admin/config/acuity-utils/acuity_encrypt/reveal-key'] = [
+    'page callback'    => 'acuity_encrypt_reveal_key_callback',
+    'access arguments' => ['administer acuity_encrypt'],
+    'file'             => 'acuity_encrypt.admin.inc',
+    'type'             => MENU_CALLBACK,
+    'delivery callback'=> 'backdrop_json_output',
   ];
 
   return $items;

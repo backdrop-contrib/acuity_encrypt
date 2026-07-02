@@ -58,12 +58,30 @@ next release.
       - private/external modes: output is raw 64-char hex key
       - Copy to clipboard works
 
-- [ ] **Key reveal panel** on View Keys tab
-      - Confirm raw key shown behind Reveal button
+- [ ] **Key reveal panel** on Set Keys tab
+      - Confirm raw key NOT present in page source before clicking Reveal
+      - Click Reveal → key fetched via AJAX and shown; Copy button works
+      - Confirm the reveal-key URL 403s / returns an error for a user without
+        `administer acuity_encrypt`, and for a stale/missing token
 
 - [ ] **Cache clear safety**
       - Clear caches → load encrypted node → confirm decrypted correctly
       - (Regression check for the `backdrop_static()` cache in load hook)
+
+- [ ] **Key overwrite confirmation** (private files)
+      - With an existing key file, paste a different key and Save without
+        ticking the checkbox → form error, key file unchanged
+      - Tick the checkbox → save succeeds, new key file written
+      - Save with the field blank → existing key preserved, no checkbox needed
+      - Save with the same key pasted back → no checkbox needed
+
+- [ ] **External file path rejected inside webroot**
+      - Point the external file path at a file under the Backdrop docroot →
+        confirm the save is blocked with a form error (not just a warning)
+
+- [ ] **Double-encryption guard on realistic input**
+      - Save a field value like `enc1:not really ciphertext` → confirm it is
+        encrypted (not stored verbatim) and decrypts back to the original text
 
 ---
 

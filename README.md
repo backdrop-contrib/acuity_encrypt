@@ -100,6 +100,8 @@ The private files directory must be outside the webroot.
 
 Place the key file anywhere on the server outside the webroot and enter the
 absolute path on the admin page. The path is stored in config; the key is not.
+Paths that resolve inside the webroot are rejected at save time — the key
+file must live outside the webroot so it can't be served over HTTP.
 
 ### Key naming convention
 
@@ -114,8 +116,20 @@ absolute path on the admin page. The path is stored in config; the key is not.
 A database dump without the key is unreadable — which is the point — but
 losing the key makes all encrypted values permanently unrecoverable.
 
-The **View keys** tab on the admin page reveals your active key behind a click
-and prompts you to save it to a password manager.
+The **Set keys** tab on the admin page reveals your active key behind a
+"Reveal key" click and prompts you to save it to a password manager. The key
+is fetched on demand via a token-protected request when you click Reveal —
+it is never embedded in the page itself, so it won't sit in page source,
+browser history, or HTTP-layer logging just from visiting the page.
+
+### Replacing an existing key
+
+There is no key rotation yet (Phase 2, not implemented) — replacing the key
+does not re-encrypt existing data. If you save a different key over one
+that's already in use, every value encrypted under the old key becomes
+permanently unreadable. The **Private files** section requires you to tick a
+confirmation checkbox before it will overwrite an existing key file, as a
+safeguard against doing this by accident.
 
 ---
 
@@ -184,7 +198,9 @@ $ciphertext = acuity_encrypt_encrypt('secret value');
 $plaintext = acuity_encrypt_decrypt($ciphertext);
 // Returns: original string, or FALSE if key is wrong / data tampered.
 
-// Test whether a value is already encrypted.
+// Test whether a value is already encrypted. Validates the base64 payload
+// and minimum length, not just the enc{slot}: prefix — a plaintext string
+// that happens to start with "enc1:" will correctly return FALSE here.
 if (acuity_encrypt_is_encrypted($value)) {
   $plaintext = acuity_encrypt_decrypt($value);
 }

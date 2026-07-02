@@ -7,6 +7,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## 1.x-0.2.0 (unreleased)
 
+### Security fixes (2026-07-02 audit)
+
+- `acuity_encrypt_is_encrypted()` now validates that the value after the
+  `enc{digits}:` prefix is valid base64 decoding to at least 28 bytes (IV+tag),
+  not just a prefix match. Previously, plaintext a user typed that happened to
+  start with `enc1:` (etc.) was mistaken for existing ciphertext by the presave
+  double-encryption guard and stored unencrypted.
+- Saving a new key on the "Private files" admin tab now requires an explicit
+  confirmation checkbox if it would overwrite a key that's already in use —
+  previously a new key silently replaced the old one, permanently orphaning
+  all data encrypted under it (no rotation/re-encryption exists yet).
+- The active encryption key is no longer embedded in the "Set keys" page's
+  HTML (masked only by CSS). It's now fetched via a CSRF-token-protected AJAX
+  endpoint (`admin/config/acuity-utils/acuity_encrypt/reveal-key`, gated on
+  `administer acuity_encrypt`) only when "Reveal key" is clicked.
+- External file key paths are now hard-rejected at validation time if they
+  resolve inside the webroot, instead of only showing a warning after saving.
+
 Complete architectural pivot: encrypt-as-behaviour via a custom widget on
 standard Backdrop text field types, replacing the original custom field type.
 

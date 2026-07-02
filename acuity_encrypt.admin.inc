@@ -75,6 +75,31 @@ function _acuity_encrypt_get_raw_key_for_display(): string|null {
   return NULL;
 }
 
+// ── Reveal-key AJAX callback ──────────────────────────────────────────────────
+
+/**
+ * Page callback: returns the raw active key as JSON.
+ *
+ * Only reachable by users with 'administer acuity_encrypt' (menu access) and
+ * a valid per-session CSRF token, so the key is never present in the initial
+ * page markup — it is fetched on demand only when "Reveal key" is clicked.
+ * The 'delivery callback' of backdrop_json_output() (set in hook_menu())
+ * serializes the return value.
+ */
+function acuity_encrypt_reveal_key_callback(): array {
+  $token = isset($_GET['token']) ? $_GET['token'] : '';
+  if (!backdrop_valid_token($token, 'acuity_encrypt_reveal_key')) {
+    return ['error' => t('Invalid or expired request.')];
+  }
+
+  $raw_key = _acuity_encrypt_get_raw_key_for_display();
+  if ($raw_key === NULL) {
+    return ['error' => t('No key available.')];
+  }
+
+  return ['key' => $raw_key];
+}
+
 // ── Key slots overview page ───────────────────────────────────────────────────
 
 /**
@@ -218,42 +243,42 @@ function acuity_encrypt_admin_form(array $form, array &$_form_state): array {
   // ── Key backup panel (visible only when a key is active) ─────────────────
 
   if ($key_available) {
-    $raw_key = _acuity_encrypt_get_raw_key_for_display();
-    if ($raw_key !== NULL) {
-      $form['key_backup'] = [
-        '#type'        => 'fieldset',
-        '#title'       => t('Your encryption key — back this up now'),
-        '#collapsible' => TRUE,
-        '#collapsed'   => FALSE,
-        '#description' => t(
-          'This is your active encryption key. '
-          . '<strong>Copy it to a password manager (e.g. <a href="https://bitwarden.com" target="_blank">Bitwarden</a>) before anything else.</strong> '
-          . 'If the server fails and you have not backed this up, all encrypted data is gone forever.'
-        ),
-      ];
-      $form['key_backup']['key_display'] = [
-        '#markup' => '<div class="acuity-encrypt-wrap">'
-          . '<span class="acuity-encrypt-masked">'
-          . str_repeat('•', min(strlen($raw_key), 64))
-          . '</span>'
-          . '<span class="acuity-encrypt-value" style="display:none;font-family:monospace;word-break:break-all">'
-          . check_plain($raw_key)
-          . '</span>'
-          . '&nbsp;<button type="button" class="acuity-encrypt-reveal-btn button">'
-          . t('Reveal key')
-          . '</button>'
-          . '&nbsp;<button type="button" class="acuity-copy-reveal-btn button" style="display:none" data-copy-target="reveal">'
-          . t('Copy')
-          . '</button>'
-          . '<span class="acuity-copy-feedback" style="display:none;margin-left:8px;color:green">'
-          . t('Copied!')
-          . '</span>'
-          . '</div>',
-        '#attached' => [
-          'js'  => [backdrop_get_path('module', 'acuity_encrypt') . '/js/acuity_encrypt.js'],
-        ],
-      ];
-    }
+    // The raw key is intentionally NOT embedded in this page's markup — it is
+    // fetched via AJAX only when "Reveal key" is clicked, so it never sits in
+    // page source, browser cache/history, or HTTP-layer logging by default.
+    $token = backdrop_get_token('acuity_encrypt_reveal_key');
+
+    $form['key_backup'] = [
+      '#type'        => 'fieldset',
+      '#title'       => t('Your encryption key — back this up now'),
+      '#collapsible' => TRUE,
+      '#collapsed'   => FALSE,
+      '#description' => t(
+        'This is your active encryption key. '
+        . '<strong>Copy it to a password manager (e.g. <a href="https://bitwarden.com" target="_blank">Bitwarden</a>) before anything else.</strong> '
+        . 'If the server fails and you have not backed this up, all encrypted data is gone forever.'
+      ),
+    ];
+    $form['key_backup']['key_display'] = [
+      '#markup' => '<div class="acuity-encrypt-wrap" data-key-url="'
+        . check_plain(url('admin/config/acuity-utils/acuity_encrypt/reveal-key', ['query' => ['token' => $token]]))
+        . '">'
+        . '<span class="acuity-encrypt-masked">' . str_repeat('•', 40) . '</span>'
+        . '<span class="acuity-encrypt-value" style="display:none;font-family:monospace;word-break:break-all"></span>'
+        . '&nbsp;<button type="button" class="acuity-encrypt-reveal-btn button">'
+        . t('Reveal key')
+        . '</button>'
+        . '&nbsp;<button type="button" class="acuity-copy-reveal-btn button" style="display:none" data-copy-target="reveal">'
+        . t('Copy')
+        . '</button>'
+        . '<span class="acuity-copy-feedback" style="display:none;margin-left:8px;color:green">'
+        . t('Copied!')
+        . '</span>'
+        . '</div>',
+      '#attached' => [
+        'js' => [backdrop_get_path('module', 'acuity_encrypt') . '/js/acuity_encrypt.js'],
+      ],
+    ];
   }
 
   // ── Section helpers ───────────────────────────────────────────────────────
@@ -417,12 +442,21 @@ function acuity_encrypt_admin_form(array $form, array &$_form_state): array {
       . '</div>',
   ];
 
+  if ($priv_key_ok) {
+    $form['section_private_file']['confirm_overwrite'] = [
+      '#type'        => 'checkbox',
+      '#title'       => t('I understand that if I save a different key here, any data already encrypted with the current key becomes permanently unreadable.'),
+      '#description' => t('Only tick this if you are intentionally replacing the key. Back up the current key first (see the panel above).'),
+    ];
+  }
+
   $form['section_private_file']['submit'] = [
     '#type'                  => 'submit',
     '#value'                 => t('Save — use private files'),
     '#name'                  => 'submit_private_file',
+    '#validate'              => ['acuity_encrypt_admin_private_file_validate'],
     '#submit'                => ['acuity_encrypt_admin_private_file_submit'],
-    '#limit_validation_errors' => [['section_private_file', 'private_key_value']],
+    '#limit_validation_errors' => [['section_private_file', 'private_key_value'], ['section_private_file', 'confirm_overwrite']],
   ];
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -555,6 +589,36 @@ function acuity_encrypt_admin_settings_php_submit(array $_form, array &$_form_st
 }
 
 /**
+ * Validate: block overwriting an existing private-file key unless the admin
+ * has ticked the "I understand" confirmation checkbox.
+ *
+ * A new key value only replaces an existing key file if it actually differs
+ * from what's currently stored — pasting back the same key (or leaving the
+ * field blank) never requires confirmation.
+ */
+function acuity_encrypt_admin_private_file_validate(array $_form, array &$form_state): void {
+  $new_key = trim($form_state['values']['private_key_value'] ?? '');
+  if ($new_key === '') {
+    return;
+  }
+
+  $realpath = _acuity_encrypt_private_key_realpath();
+  if (!$realpath || !file_exists($realpath)) {
+    return;
+  }
+
+  $existing_key = trim((string) file_get_contents($realpath));
+  if ($existing_key === '' || $existing_key === $new_key) {
+    return;
+  }
+
+  if (empty($form_state['values']['confirm_overwrite'])) {
+    form_set_error('section_private_file][confirm_overwrite',
+      t('A key is already saved here. Tick the confirmation checkbox to replace it — doing so will permanently make any data encrypted with the current key unreadable.'));
+  }
+}
+
+/**
  * Submit: save key to private filesystem and switch to private_file method.
  */
 function acuity_encrypt_admin_private_file_submit(array $_form, array &$form_state): void {
@@ -585,6 +649,17 @@ function acuity_encrypt_admin_external_file_validate(array $_form, array &$form_
   if (!is_readable($path)) {
     form_set_error('section_external_file][external_file_path',
       t('The file at %path exists but cannot be read by the web server. Check file permissions (try chmod 0440).', ['%path' => $path]));
+    return;
+  }
+
+  // Hard-block paths inside the webroot: if the web server config ever
+  // changes (or a .htaccess/nginx rule is missing), a key file inside the
+  // webroot is directly downloadable via a browser URL.
+  $webroot  = backdrop_realpath(BACKDROP_ROOT);
+  $ext_real = realpath($path);
+  if ($webroot && $ext_real && strpos($ext_real, $webroot) === 0) {
+    form_set_error('section_external_file][external_file_path',
+      t('The path %path is inside the webroot and could be served directly over HTTP. Choose a location outside the webroot (e.g. a sibling directory to your Backdrop install).', ['%path' => $path]));
   }
 }
 

@@ -242,6 +242,23 @@ Status: **architecture complete, partially tested on dev**.
 - WYSIWYG overlay mask ✓
 - Key admin UI (tabs, accordion, generate key) ✓
 
+### Security audit fixes (2026-07-02)
+
+- `acuity_encrypt_is_encrypted()` hardened to validate base64/length, not just
+  the `enc\d+:` prefix — closes a bypass where plaintext starting with that
+  pattern was never encrypted at rest.
+- Private-file key overwrite now requires a confirmation checkbox (data-loss
+  guard — no key rotation exists yet, so overwriting orphans old ciphertext).
+- Admin key backup panel no longer embeds the raw key in page HTML; it's
+  fetched via a token-protected AJAX endpoint on "Reveal key" click.
+- External file path validation hard-rejects paths inside the webroot.
+
+Deliberately not changed: the `view encrypted fields` permission is
+by design a UI-masking permission (gates this module's own widget/formatter),
+not an access-control mechanism — `hook_field_attach_load()` decrypts
+unconditionally so other consumers (Views, REST, tokens) work transparently.
+See the file-level docblock in `acuity_encrypt.field.inc`.
+
 Still needs:
 - Full round-trip test: create node → view (masked display) → edit (masked widget) → reveal → save → re-view.
 - Test WYSIWYG: long text field with CKEditor — reveal overlay, edit, save, re-view.
@@ -259,8 +276,12 @@ Still needs:
 See TODO.md in this directory for the full prioritised list.
 
 Short-term:
-- Complete dev testing (see checklist above).
-- Build `acuity_secure_message` module.
+- **Next session: start `acuity_secure_message` module.** Uses this module's
+  public API (`acuity_encrypt_encrypt()` / `acuity_encrypt_decrypt()`) to
+  store message bodies encrypted at rest in a custom DB table — see "Used by"
+  above. acuity_encrypt itself is stable enough to build on (core + 2026-07-02
+  security fixes done); dev testing checklist below can run in parallel/after.
+- Complete dev testing (see checklist above and TODO.md).
 
 Phase 2 (do not implement until core is stable and tested):
 - Key slot management UI: multiple slots, status (Active/In-use/Available/Missing).

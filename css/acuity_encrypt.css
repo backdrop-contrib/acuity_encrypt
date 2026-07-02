@@ -1,0 +1,161 @@
+/* ── Field formatter: reveal button ────────────────────────────────────────── */
+
+.acuity-encrypt-masked {
+  font-family: monospace;
+  letter-spacing: 0.15em;
+  color: #777;
+}
+
+.acuity-encrypt-value {
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.acuity-encrypt-reveal-btn {
+  background: none;
+  border: 1px solid #aaa;
+  border-radius: 3px;
+  color: #555;
+  cursor: pointer;
+  font-size: 0.8em;
+  margin-left: 6px;
+  padding: 1px 7px;
+  vertical-align: middle;
+}
+
+.acuity-encrypt-reveal-btn:hover {
+  background: #f0f0f0;
+  border-color: #888;
+}
+
+/* ── Edit widget: masked field + reveal button ─────────────────────────────── */
+
+.acuity-encrypt-widget-wrap {
+  display: inline-block;
+}
+
+.acuity-widget-mask-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.acuity-widget-mask-display {
+  background: #f5f5f5;
+  color: #888;
+  cursor: default;
+  letter-spacing: 0.2em;
+  pointer-events: none;
+}
+
+.acuity-widget-reveal-btn {
+  background: none;
+  border: 1px solid #aaa;
+  border-radius: 3px;
+  color: #444;
+  cursor: pointer;
+  font-size: 0.85em;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+
+.acuity-widget-reveal-btn:hover {
+  background: #f0f0f0;
+  border-color: #666;
+}
+
+/* ── Edit widget: WYSIWYG overlay mask ─────────────────────────────────────── */
+
+.acuity-encrypt-wysiwyg-wrap {
+  position: relative;
+}
+
+.acuity-wysiwyg-mask {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  background: #f5f5f5;
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+/* ── Admin page: section status indicators ─────────────────────────────────── */
+
+.acuity-status-ok {
+  color: #2a7a2a;
+  font-weight: bold;
+}
+
+.acuity-status-missing {
+  color: #c00;
+  font-weight: bold;
+}
+
+/* ── Admin page: generate key area ────────────────────────────────────────── */
+
+.acuity-generate-wrap {
+  margin: 1em 0;
+  padding: 1em;
+  background: #f8f8f8;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+}
+
+.acuity-generated-area {
+  margin-top: 0.8em;
+}
+
+.acuity-generated-area .acuity-key-line {
+  font-family: monospace;
+  font-size: 0.85em;
+  resize: none;
+  background: #fff;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+  padding: 5px 8px;
+}
+
+.acuity-copy-key-btn,
+.acuity-copy-reveal-btn {
+  white-space: nowrap;
+}
+
+.acuity-copy-feedback {
+  color: #2a7a2a;
+  font-weight: bold;
+  font-size: 0.9em;
+}
+
+/* ── Admin page: external file command block ───────────────────────────────── */
+
+.acuity-ext-command {
+  background: #272822;
+  color: #f8f8f2;
+  border-radius: 4px;
+  padding: 10px 14px;
+  font-size: 0.82em;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0.5em 0;
+}
+
+.acuity-ext-command .acuity-key-placeholder {
+  color: #e6db74;
+}
+
+/* ── Admin page: accordion section spacing ─────────────────────────────────── */
+
+.acuity-encrypt-section {
+  margin-bottom: 0.5em;
+}
+
+.acuity-encrypt-section fieldset {
+  margin-bottom: 1em;
+}

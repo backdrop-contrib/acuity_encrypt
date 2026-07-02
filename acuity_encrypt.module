@@ -1,0 +1,295 @@
+<?php
+
+/**
+ * @file
+ * Acuity Encrypt — AES-256-GCM field encryption for Backdrop CMS.
+ *
+ * Provides a public encryption API and an 'acuity_encrypted_text' field type.
+ * Uses PHP's built-in OpenSSL extension — no external libraries required.
+ *
+ * Key configuration (add to settings.php for production):
+ * @code
+ *   $settings['acuity_encrypt_key1'] = 'your-long-random-secret';
+ * @endcode
+ *
+ * Generate a suitable key:
+ * @code
+ *   php -r "echo bin2hex(random_bytes(32));"
+ * @endcode
+ */
+
+module_load_include('inc', 'acuity_encrypt', 'acuity_encrypt.field');
+module_load_include('inc', 'acuity_encrypt', 'acuity_encrypt.admin');
+module_load_include('inc', 'acuity_encrypt', 'acuity_encrypt.actions');
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Encrypts a plaintext string using AES-256-GCM.
+ *
+ * The returned string is self-contained: it carries its own IV and
+ * authentication tag, so each call produces a different ciphertext even for
+ * identical input. Safe to store directly in a database column.
+ *
+ * Ciphertext format: enc{slot}:base64(iv[12] . tag[16] . ciphertext)
+ * Example:           enc1:AAECAwQFBgcICQoL...
+ *
+ * The slot number identifies which key was used, allowing future support for
+ * multiple keys or key rotation without re-encrypting all existing data.
+ * Currently only slot 1 is used; new slots can be added later.
+ *
+ * @param string $plaintext
+ *   The value to encrypt.
+ * @param int $slot
+ *   Key slot identifier (default 1). Reserved for future multi-key support.
+ *
+ * @return string|false
+ *   'enc{slot}:' + base64(iv . tag . ciphertext), or FALSE on failure.
+ */
+function acuity_encrypt_encrypt(string $plaintext, int $slot = 1): string|false {
+  $key = _acuity_encrypt_get_key($slot);
+  if (!$key) {
+    watchdog('acuity_encrypt', 'Encryption failed: no key configured for slot @slot.', ['@slot' => $slot], WATCHDOG_ERROR);
+    return FALSE;
+  }
+
+  $iv  = random_bytes(12);
+  $tag = '';
+  $ciphertext = openssl_encrypt(
+    $plaintext,
+    'aes-256-gcm',
+    $key,
+    OPENSSL_RAW_DATA,
+    $iv,
+    $tag,
+    '',
+    16,
+  );
+
+  if ($ciphertext === FALSE) {
+    watchdog('acuity_encrypt', 'openssl_encrypt() failed for slot @slot.', ['@slot' => $slot], WATCHDOG_ERROR);
+    return FALSE;
+  }
+
+  return 'enc' . $slot . ':' . base64_encode($iv . $tag . $ciphertext);
+}
+
+/**
+ * Decrypts a ciphertext string produced by acuity_encrypt_encrypt().
+ *
+ * The GCM authentication tag is verified automatically by OpenSSL; a tampered
+ * or corrupted ciphertext returns FALSE. The key slot is read from the
+ * ciphertext prefix so the correct key is always used automatically.
+ *
+ * @param string $ciphertext
+ *   The 'enc{slot}:…' string to decrypt.
+ *
+ * @return string|false
+ *   The original plaintext, or FALSE if decryption or tag verification fails.
+ */
+function acuity_encrypt_decrypt(string $ciphertext): string|false {
+  if (!preg_match('/^enc(\d+):(.+)$/s', $ciphertext, $m)) {
+    return FALSE;
+  }
+
+  $slot    = (int) $m[1];
+  $encoded = $m[2];
+
+  $key = _acuity_encrypt_get_key($slot);
+  if (!$key) {
+    return FALSE;
+  }
+
+  $raw = base64_decode($encoded, TRUE);
+  // Minimum valid length: 12 (IV) + 16 (tag) = 28 bytes before ciphertext.
+  if ($raw === FALSE || strlen($raw) < 28) {
+    return FALSE;
+  }
+
+  $iv   = substr($raw, 0, 12);
+  $tag  = substr($raw, 12, 16);
+  $data = substr($raw, 28);
+
+  return openssl_decrypt($data, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+}
+
+/**
+ * Returns TRUE if a value was produced by acuity_encrypt_encrypt().
+ *
+ * Matches the 'enc{digits}:' prefix, e.g. enc1:, enc2:, enc123:
+ *
+ * @param string $value
+ *   The string to test.
+ *
+ * @return bool
+ */
+function acuity_encrypt_is_encrypted(string $value): bool {
+  return (bool) preg_match('/^enc\d+:/', $value);
+}
+
+/**
+ * Returns the key slot number embedded in a ciphertext string, or NULL.
+ *
+ * @param string $ciphertext
+ *   A value that may have been produced by acuity_encrypt_encrypt().
+ *
+ * @return int|null
+ */
+function acuity_encrypt_get_slot(string $ciphertext): int|null {
+  return preg_match('/^enc(\d+):/', $ciphertext, $m) ? (int) $m[1] : NULL;
+}
+
+/**
+ * Returns TRUE if an encryption key is available and encryption will work.
+ *
+ * @return bool
+ */
+function acuity_encrypt_key_available(): bool {
+  return _acuity_encrypt_get_key() !== NULL;
+}
+
+// ── Hook implementations ──────────────────────────────────────────────────────
+
+/**
+ * Implements hook_menu().
+ */
+function acuity_encrypt_menu(): array {
+  $items = [];
+
+  // Shared Acuity Utils landing page — other acuity_* modules declare this too;
+  // Backdrop deduplicates by path so only one definition wins.
+  $items['admin/config/acuity-utils'] = [
+    'title'           => 'Acuity Utils',
+    'description'     => 'Acuity standalone utilities configuration.',
+    'page callback'   => 'system_admin_menu_block_page',
+    'access arguments'=> ['access administration pages'],
+    'file'            => 'system.admin.inc',
+    'file path'       => backdrop_get_path('module', 'system'),
+    'position'        => 'right',
+    'weight'          => -10,
+  ];
+
+  // Main page — key slots overview.
+  $items['admin/config/acuity-utils/acuity_encrypt'] = [
+    'title'            => 'Encryption Settings',
+    'description'      => 'Manage encryption keys and check key status.',
+    'page callback'    => 'acuity_encrypt_keys_overview',
+    'access arguments' => ['administer acuity_encrypt'],
+    'file'             => 'acuity_encrypt.admin.inc',
+    'type'             => MENU_NORMAL_ITEM,
+    'weight'           => 20,
+  ];
+
+  // "View keys" tab — default local task, shares the parent path and callback.
+  $items['admin/config/acuity-utils/acuity_encrypt/keys'] = [
+    'title'  => 'View keys',
+    'type'   => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -10,
+  ];
+
+  // "Set keys" tab — the accordion settings form.
+  $items['admin/config/acuity-utils/acuity_encrypt/settings'] = [
+    'title'            => 'Set keys',
+    'page callback'    => 'backdrop_get_form',
+    'page arguments'   => ['acuity_encrypt_admin_form'],
+    'access arguments' => ['administer acuity_encrypt'],
+    'file'             => 'acuity_encrypt.admin.inc',
+    'type'             => MENU_LOCAL_TASK,
+    'weight'           => 10,
+  ];
+
+  return $items;
+}
+
+/**
+ * Implements hook_permission().
+ */
+function acuity_encrypt_permission(): array {
+  return [
+    'administer acuity_encrypt' => [
+      'title'           => t('Administer Acuity Encrypt'),
+      'description'     => t('Manage encryption key settings.'),
+      'restrict access' => TRUE,
+    ],
+    'view encrypted fields' => [
+      'title'           => t('View encrypted field values'),
+      'description'     => t('Decrypt and reveal encrypted field content on display.'),
+      'restrict access' => TRUE,
+    ],
+  ];
+}
+
+/**
+ * Implements hook_config_info().
+ */
+function acuity_encrypt_config_info(): array {
+  return [
+    'acuity_encrypt.settings' => [
+      'label' => t('Acuity Encrypt settings'),
+      'group' => t('Configuration'),
+    ],
+  ];
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Returns a 32-byte binary key for the given slot, or NULL if unavailable.
+ *
+ * Priority order:
+ *   1. $settings['acuity_encrypt_key'] in settings.php — always checked first.
+ *      For future multi-key support, slot 1 maps to 'acuity_encrypt_key' and
+ *      slot N maps to 'acuity_encrypt_key_N'.
+ *   2. The storage method configured on the admin page:
+ *      a. 'external_file' — absolute path set by admin; file created manually.
+ *      b. 'private_file'  — private://keys/acuity_encrypt.key, written via UI.
+ *
+ * Keys are hashed with SHA-256 to a fixed 32-byte AES key, so any length
+ * passphrase or hex string is acceptable as the raw value.
+ *
+ * Keys are never stored in CMI config or the database.
+ *
+ * @param int $slot
+ *   Key slot identifier. Currently only slot 1 is used.
+ */
+function _acuity_encrypt_get_key(int $slot = 1): string|null {
+  global $settings;
+
+  // 1. settings.php — preferred, never in DB or config exports.
+  // Key name matches the slot number: acuity_encrypt_key1, acuity_encrypt_key2, etc.
+  // This mirrors the private/external file naming so all methods are consistent.
+  $settings_key_name = 'acuity_encrypt_key' . $slot;
+  if (!empty($settings[$settings_key_name])) {
+    return hash('sha256', $settings[$settings_key_name], TRUE);
+  }
+
+  $method = config_get('acuity_encrypt.settings', 'key_storage_method') ?: 'settings_php';
+
+  // 2a. External file — path stored in config, key content is in the file.
+  if ($method === 'external_file') {
+    $path = config_get('acuity_encrypt.settings', 'external_file_path');
+    if (!empty($path) && is_readable($path)) {
+      $raw = trim(file_get_contents($path));
+      if (!empty($raw)) {
+        return hash('sha256', $raw, TRUE);
+      }
+    }
+    return NULL;
+  }
+
+  // 2b. Private file — written by the module via the admin UI.
+  if ($method === 'private_file') {
+    $uri      = 'private://keys/acuity_encrypt_key' . $slot . '.key';
+    $realpath = backdrop_realpath($uri);
+    if ($realpath && is_readable($realpath)) {
+      $raw = trim(file_get_contents($realpath));
+      if (!empty($raw)) {
+        return hash('sha256', $raw, TRUE);
+      }
+    }
+    return NULL;
+  }
+
+  // settings_php method selected but key not found in settings.php.
+  return NULL;
+}

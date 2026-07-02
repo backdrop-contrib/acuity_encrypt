@@ -1,0 +1,30 @@
+<?php
+
+/**
+ * @file
+ * Install and uninstall hooks for Acuity Encrypt.
+ *
+ * No custom DB tables are needed — the field type uses Backdrop's Field API
+ * storage. This file only manages the CMI config file lifecycle.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function acuity_encrypt_install(): void {
+  config('acuity_encrypt.settings')
+    ->set('key_storage_method', 'settings_php')
+    ->set('external_file_path', '')
+    ->save();
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function acuity_encrypt_uninstall(): void {
+  $config_directory = config_get_config_directory('active');
+  $file = $config_directory . '/acuity_encrypt.settings.json';
+  if (file_exists($file)) {
+    unlink($file);
+  }
+}

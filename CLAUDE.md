@@ -33,14 +33,18 @@ ciphertext in the DB — a warning is shown in the Field UI settings.
 ## File map
 
 ```
-acuity_encrypt.module      Public API + hooks (menu, permission, config_info)
+acuity_encrypt.module      Public API + slot registry + hooks (menu, permission,
+                           config_info, init warning, cron recount)
 acuity_encrypt.field.inc   Widget, formatters, load/presave hooks (loaded at boot)
-acuity_encrypt.admin.inc   Admin settings page — key tabs, accordion, generate key
+acuity_encrypt.admin.inc   Admin: keys overview, slot add/edit/activate,
+                           Set keys accordion, generate key, reveal endpoint
+acuity_encrypt.rotate.inc  Hard rotation: form + Batch API ops (Phase 2)
 acuity_encrypt.actions.inc VBO action: bulk encrypt existing field values
-acuity_encrypt.install     hook_install / hook_uninstall (CMI lifecycle)
-config/acuity_encrypt.settings.json  CMI config: storage method + external path
+acuity_encrypt.install     hook_install / update_1000 / hook_uninstall
+config/acuity_encrypt.settings.json  Legacy slot-1 config (kept in sync)
+config/acuity_encrypt.slots.json     Slot registry: active_slot + per-slot storage
 js/acuity_encrypt.js       Reveal toggles: display formatter + edit widget
-js/acuity_encrypt.admin.js Generate key button, copy-to-clipboard
+js/acuity_encrypt.admin.js Generate key button (slot-aware), copy-to-clipboard
 css/acuity_encrypt.css     Masked/revealed styles, WYSIWYG overlay, admin styles
 ```
 
@@ -65,12 +69,16 @@ the top of `.module` so all hook implementations are always discoverable.
 
 ### Storage priority (highest first)
 
-1. `$settings['acuity_encrypt_key1']` in `settings.php` — always checked first;
-   never in DB or config exports.
-2. External file — absolute path configured in admin settings.
-3. Private file — `private://keys/acuity_encrypt_key1.key`, written via admin UI.
+1. `$settings['acuity_encrypt_key{N}']` in `settings.php` — always checked
+   first for every slot, regardless of the slot's registered storage; never
+   in DB or config exports.
+2. The storage registered for the slot in `acuity_encrypt.slots.json`:
+   external file (per-slot absolute path) or private file
+   (`private://keys/acuity_encrypt_key{N}.key`).
 
-Keys are **never stored in CMI config or the database**.
+Keys are **never stored in CMI config or the database** — the registry holds
+only labels, storage method, and paths. If the registry is empty (unmigrated
+site), `acuity_encrypt_slots()` synthesizes slot 1 from the legacy settings.
 
 ### Key naming convention
 
@@ -227,14 +235,24 @@ admin/config/acuity-utils/acuity_encrypt/settings  → Set keys tab (accordion f
 
 ## Used by
 
-- `acuity_secure_message` (planned) — calls `acuity_encrypt_encrypt()` /
-  `acuity_encrypt_decrypt()` to store message body encrypted at rest.
+- `acuity_secure_link` (planned, design done — see `../acuity_secure_link/CLAUDE.md`)
+  — generic tokenised secure-link core. Needs a key-override variant of this
+  module's API for token-derived (HKDF) payload encryption.
+- `acuity_secure_message` (planned) — now a **consumer of acuity_secure_link**
+  rather than a standalone build: link core handles token/expiry/revocation,
+  this module's crypto primitive encrypts the message payload.
+- External sites/modules may consume the public API directly for encrypting
+  sensitive metadata fields. Note for site builders: field encryption covers
+  text fields only — uploaded files rely on the private filesystem + node
+  access, not encryption at rest.
 
 ---
 
 ## CURRENT STATE
 
-Status: **architecture complete, partially tested on dev**.
+Status: **architecture complete, partially tested on dev. Phase 2 (key
+slots + rotation) built and CLI-tested 2026-07-06 — see the PHASE 2 section
+at the bottom; browser click-through of the new admin pages outstanding.**
 
 - Widget appears in Field UI widget dropdown ✓
 - Display formatters registered ✓
@@ -275,26 +293,103 @@ Still needs:
 
 See TODO.md in this directory for the full prioritised list.
 
-Short-term:
-- **Next session: start `acuity_secure_message` module.** Uses this module's
-  public API (`acuity_encrypt_encrypt()` / `acuity_encrypt_decrypt()`) to
-  store message bodies encrypted at rest in a custom DB table — see "Used by"
-  above. acuity_encrypt itself is stable enough to build on (core + 2026-07-02
-  security fixes done); dev testing checklist below can run in parallel/after.
+Short-term (plan revised 2026-07-06):
+- ~~Build `acuity_secure_link` core~~ **DONE 2026-07-06** (Phase A) — see
+  `../acuity_secure_link/CLAUDE.md`. Secure-message links and document
+  share links are the same architecture (token → scoped expiring access →
+  revoke → audit), so the core is built once and consumed by type plugins.
+  In-Backdrop testing outstanding (its TODO Phase A checklist).
+- ~~Add key-override API variants~~ **DONE 2026-07-06**:
+  `acuity_encrypt_encrypt_with_key()` / `acuity_encrypt_decrypt_with_key()` —
+  caller supplies 32 bytes, bare base64 return (no slot prefix). Standalone
+  round-trip/tamper tests pass; secure_link consumes them.
+- Then `acuity_secure_message` as the first consumer (Phase B in
+  secure_link TODO). Site-specific consumers (e.g. document-portal share
+  links) live in their own sites/modules and are not referenced here.
 - Complete dev testing (see checklist above and TODO.md).
 
-Phase 2 (do not implement until core is stable and tested):
-- Key slot management UI: multiple slots, status (Active/In-use/Available/Missing).
-- Hard rotation batch: re-encrypt all enc1: values to enc2: slot.
+Phase 2 — DONE 2026-07-06 (see the PHASE 2 section at the bottom):
+- ~~Key slot management UI~~ ✓ (statuses: Active/In use/Available/Missing/Unconfigured)
+- ~~Hard rotation batch~~ ✓ (incl. revision tables)
+Still future:
 - Per-field "last encrypted" timestamp for audit trail.
+- Drush/bee rotate command.
 
 
 ==================================================
-PHASE 2 — KEY SLOT MANAGEMENT
+PHASE 2 — KEY SLOT MANAGEMENT — IMPLEMENTED 2026-07-06
 ==================================================
 
-Design agreed in session 2026-07-02. Do not implement until acuity_encrypt
-core and acuity_secure_message are stable and tested.
+Design agreed 2026-07-02; built and tested 2026-07-06 (32-assertion CLI
+harness on bertie: migration, per-slot keys, slot targeting, live counts
+incl. revisions, statuses, missing-key state flag, rotate 1→2 on real nodes
+with revisions, decrypt-after-rotate, reverse rotation).
+
+Implementation notes / deviations from the design below:
+- Slot registry lives in config/acuity_encrypt.slots.json
+  (active_slot + slots{id: label, storage, external_path}). KEYS themselves
+  still never touch config.
+- value_count is NOT stored in the registry (config exports must not carry
+  environment data). Counts are computed live by
+  acuity_encrypt_slot_value_counts() — which also counts field_revision_*
+  tables, since a key can only be retired when revisions are migrated too —
+  and cached in state for the cheap admin-page warning.
+- Statuses: added 'unconfigured' (no key AND no data) alongside the four
+  designed ones. Derived at display time by acuity_encrypt_slot_status().
+- acuity_encrypt_encrypt() slot param is now NULL-default → active slot.
+- Missing-key warning: hook_init() on admin pages reads a state flag
+  (acuity_encrypt_missing_key_slots) maintained by the counts function
+  (refreshed on cron, keys overview, and rotation finish) — no queries on
+  ordinary admin pages. Orphan detection (enc{N}: data for unregistered N)
+  included on the overview page.
+- Rotation: acuity_encrypt.rotate.inc — form + Batch API, 50 rows/pass,
+  direct db_update on field tables (entity hooks/timestamps untouched),
+  optimistic old-value guard against concurrent edits, decrypt-failure rows
+  skipped permanently (no infinite loop) and logged, field + entity caches
+  flushed in finished callback, recount at end tells the admin when the
+  source slot is retirable. Legacy accordion submits stay in sync with
+  registry slot 1; existing sites migrate via acuity_encrypt_update_1000().
+- Drush/bee rotate command: not built (no CLI on Windows dev box) — still
+  in Future/Nice-to-have.
+
+==================================================
+PHASE 3 — FILE ENCRYPTION (future; design sketch 2026-07-06)
+==================================================
+
+Goal: at-rest encryption for uploaded files (private://), opt-in per file
+field. Enables honest "documents encrypted at rest" claims (e.g. SSL Vault).
+
+DESIGN — ENVELOPE ENCRYPTION
+────────────────────────────
+  - Per-file random 32-byte FILE KEY encrypts the file content.
+    Cipher: sodium crypto_secretstream_xchacha20poly1305 (built into PHP
+    7.2+, zero deps, chunked ~64KB, authenticated, streaming both ways).
+  - FILE KEY is WRAPPED with the active SLOT key using
+    acuity_encrypt_encrypt_with_key(), stored in a DB table keyed by fid
+    with the standard enc{slot}: prefix.
+  - Rotation therefore re-wraps ~100-byte keys, never the files themselves —
+    extend the existing rotation batch + slot value counts to include the
+    wrapped-keys table.
+  - Delivery: encrypt on upload (file presave / stream wrapper), stream-
+    decrypt in hook_file_download. File on disk is ciphertext; size differs
+    from original (store original size + mime in the key table).
+
+V1 SCOPE
+────────
+  - Plain file fields (PDF/DXF/JPG originals) — no image-style derivatives.
+  - Whole-file streaming (no byte-range support yet; pdf.js falls back to
+    full fetch).
+
+KNOWN HARD PARTS (v2+)
+──────────────────────
+  - Image styles: derivatives need decrypt-to-temp → generate → encrypt.
+  - Direct file readers on this site: getid3, pdf_to_image, imagemagick —
+    must go through a decrypt API or be excluded from encrypted fields.
+  - Seekable decryption (chunk index in AAD) for HTTP range requests.
+
+==================================================
+PHASE 2 REFERENCE — KEY SLOT MANAGEMENT (implemented)
+==================================================
 
 SLOT STATUSES
 ─────────────

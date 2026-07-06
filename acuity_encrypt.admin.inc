@@ -45,27 +45,34 @@ function _acuity_encrypt_private_dir_is_safe(): bool {
 /**
  * Returns the raw (pre-hash) key string for the backup reveal panel.
  *
- * Reads from whichever source is active. Returns NULL if no key is configured.
+ * Reads the ACTIVE slot's key from whichever storage that slot uses.
+ * Returns NULL if no key is configured.
  */
 function _acuity_encrypt_get_raw_key_for_display(): string|null {
   global $settings;
 
-  if (!empty($settings['acuity_encrypt_key1'])) {
-    return $settings['acuity_encrypt_key1'];
+  $slot = acuity_encrypt_active_slot();
+  $registry = acuity_encrypt_slots();
+
+  if (!empty($settings['acuity_encrypt_key' . $slot])) {
+    return $settings['acuity_encrypt_key' . $slot];
   }
 
-  $method = config_get('acuity_encrypt.settings', 'key_storage_method') ?: 'settings_php';
+  $info = $registry['slots'][$slot] ?? NULL;
+  if ($info === NULL) {
+    return NULL;
+  }
 
-  if ($method === 'external_file') {
-    $path = config_get('acuity_encrypt.settings', 'external_file_path');
+  if ($info['storage'] === 'external_file') {
+    $path = $info['external_path'];
     if (!empty($path) && is_readable($path)) {
       return trim(file_get_contents($path)) ?: NULL;
     }
     return NULL;
   }
 
-  if ($method === 'private_file') {
-    $realpath = backdrop_realpath('private://keys/acuity_encrypt_key1.key');
+  if ($info['storage'] === 'private_file') {
+    $realpath = backdrop_realpath('private://keys/acuity_encrypt_key' . $slot . '.key');
     if ($realpath && is_readable($realpath)) {
       return trim(file_get_contents($realpath)) ?: NULL;
     }
@@ -103,84 +110,105 @@ function acuity_encrypt_reveal_key_callback(): array {
 // ── Key slots overview page ───────────────────────────────────────────────────
 
 /**
- * Page callback for the "View keys" tab.
- *
- * Displays a table of key slots and their current status. Only Slot 1 is
- * active in this version; the table is structured for future multi-slot
- * support.
- *
- * @return array
- *   Render array.
+ * Returns the human label + identifier markup for a slot's storage.
  */
-function acuity_encrypt_keys_overview(): array {
-  $config = config('acuity_encrypt.settings');
-  $method = $config->get('key_storage_method') ?: 'settings_php';
-
-  // ── Slot 1 row ─────────────────────────────────────────────────────────
-
-  $key_available = acuity_encrypt_key_available();
-
-  if ($key_available) {
-    $status_html = '<span class="acuity-status-ok">&#10003; ' . t('Active') . '</span>';
-  }
-  else {
-    $status_html = '<span class="acuity-status-missing">&#10007; ' . t('Key missing') . '</span>';
-  }
-
+function _acuity_encrypt_slot_storage_cells(int $slot_id, array $info): array {
   $method_labels = [
     'settings_php'  => t('settings.php'),
     'private_file'  => t('Private files'),
     'external_file' => t('External file'),
   ];
-  $method_label = isset($method_labels[$method]) ? $method_labels[$method] : $method;
+  $method_label = $method_labels[$info['storage']] ?? $info['storage'];
 
-  switch ($method) {
+  switch ($info['storage']) {
     case 'settings_php':
-      $key_identifier = '<code>$settings[\'acuity_encrypt_key1\']</code> in settings.php';
+      $identifier = '<code>$settings[\'acuity_encrypt_key' . $slot_id . '\']</code>';
       break;
 
     case 'private_file':
-      $uri      = 'private://keys/acuity_encrypt_key1.key';
+      $uri = 'private://keys/acuity_encrypt_key' . $slot_id . '.key';
       $realpath = backdrop_realpath($uri);
-      $key_identifier = '<code>' . check_plain($realpath ?: $uri) . '</code>';
+      $identifier = '<code>' . check_plain($realpath ?: $uri) . '</code>';
       break;
 
     case 'external_file':
-      $path = $config->get('external_file_path') ?: '';
-      $key_identifier = $path
-        ? '<code>' . check_plain($path) . '</code>'
+      $identifier = !empty($info['external_path'])
+        ? '<code>' . check_plain($info['external_path']) . '</code>'
         : '<em>' . t('(path not configured)') . '</em>';
       break;
 
     default:
-      $key_identifier = '<em>' . t('Unknown') . '</em>';
+      $identifier = '<em>' . t('Unknown') . '</em>';
   }
+  return [$method_label, $identifier];
+}
 
-  $rows = [
-    [
-      ['data' => '1'],
-      ['data' => t('Default')],
-      ['data' => $method_label],
-      ['data' => $key_identifier],
-      ['data' => $status_html],
-    ],
+/**
+ * Page callback for the "View keys" tab.
+ *
+ * Shows every registered key slot with its storage, live encrypted-value
+ * count (current + revision rows), and derived status. Visiting this page
+ * also refreshes the missing-key warning state.
+ */
+function acuity_encrypt_keys_overview(): array {
+  $registry = acuity_encrypt_slots();
+  $counts = acuity_encrypt_slot_value_counts();
+  $active = acuity_encrypt_active_slot();
+
+  $status_labels = [
+    'active'       => '<span class="acuity-status-ok">&#10003; ' . t('Active') . '</span>',
+    'in_use'       => '<span class="acuity-status-ok">' . t('In use') . '</span>',
+    'available'    => t('Available'),
+    'missing'      => '<span class="acuity-status-missing">&#10007; ' . t('KEY MISSING — data at risk') . '</span>',
+    'unconfigured' => '<em>' . t('No key configured') . '</em>',
   ];
+
+  $rows = [];
+  foreach ($registry['slots'] as $slot_id => $info) {
+    $status = acuity_encrypt_slot_status($slot_id, $counts);
+    list($method_label, $identifier) = _acuity_encrypt_slot_storage_cells($slot_id, $info);
+
+    $operations = [];
+    $operations[] = l(t('Edit'), 'admin/config/acuity-utils/acuity_encrypt/slots/' . $slot_id . '/edit');
+    if ($slot_id !== $active && in_array($status, ['in_use', 'available'], TRUE)) {
+      $operations[] = l(t('Set active'), 'admin/config/acuity-utils/acuity_encrypt/slots/' . $slot_id . '/activate');
+    }
+
+    $rows[] = [
+      ['data' => $slot_id],
+      ['data' => check_plain($info['label'])],
+      ['data' => $method_label],
+      ['data' => $identifier],
+      ['data' => (string) ($counts['slots'][$slot_id] ?? 0)],
+      ['data' => $status_labels[$status]],
+      ['data' => implode(' · ', $operations)],
+    ];
+  }
 
   $header = [
     t('Slot'),
     t('Label'),
     t('Storage method'),
     t('Key identifier'),
+    t('Encrypted entries'),
     t('Status'),
+    t('Operations'),
   ];
-
-  // ── Build render array ──────────────────────────────────────────────────
 
   $build = [];
 
   $build['#attached'] = [
     'css' => [backdrop_get_path('module', 'acuity_encrypt') . '/css/acuity_encrypt.css'],
   ];
+
+  if ($counts['orphan'] > 0) {
+    $build['orphan_warning'] = [
+      '#markup' => '<p class="messages error">' . t(
+        '@count encrypted value(s) reference a key slot that is not in the registry. Add the matching slot (with its original key) so this data can be decrypted.',
+        ['@count' => $counts['orphan']]
+      ) . '</p>',
+    ];
+  }
 
   $build['table'] = [
     '#theme'      => 'table',
@@ -189,18 +217,22 @@ function acuity_encrypt_keys_overview(): array {
     '#attributes' => ['class' => ['acuity-encrypt-keys-table']],
   ];
 
-  $build['note'] = [
+  $build['explain'] = [
     '#markup' => '<p class="description" style="margin-top:1em">'
-      . t('<strong>Note:</strong> Only Slot 1 is available in this version. '
-        . 'Multiple key slots and key rotation — for migrating existing encrypted data to a new key '
-        . 'without downtime — are planned for a future release.')
+      . t('<strong>Active</strong> — all new encryptions use this slot. '
+        . '<strong>In use</strong> — holds data; its key must remain configured. '
+        . '<strong>Available</strong> — key configured, zero entries; safe to retire or reuse. '
+        . '"Encrypted entries" counts stored field values protected by the slot\'s key — one field on many nodes counts many entries, and revision copies are included. It is not a count of keys (each slot holds exactly one key).')
       . '</p>',
   ];
 
-  $build['link'] = [
-    '#markup' => '<p style="margin-top:0.8em">'
-      . l(t('Configure key storage »'), 'admin/config/acuity-utils/acuity_encrypt/settings')
-      . '</p>',
+  $links = [
+    l(t('+ Add key slot'), 'admin/config/acuity-utils/acuity_encrypt/slots/add'),
+    l(t('Rotate keys »'), 'admin/config/acuity-utils/acuity_encrypt/rotate'),
+    l(t('Guided Slot 1 setup »'), 'admin/config/acuity-utils/acuity_encrypt/settings'),
+  ];
+  $build['links'] = [
+    '#markup' => '<p style="margin-top:0.8em">' . implode(' &nbsp;|&nbsp; ', $links) . '</p>',
   ];
 
   return $build;
@@ -574,6 +606,7 @@ function acuity_encrypt_admin_settings_php_submit(array $_form, array &$_form_st
     ->set('key_storage_method', 'settings_php')
     ->set('external_file_path', '')
     ->save();
+  _acuity_encrypt_registry_set_slot(1, ['storage' => 'settings_php', 'external_path' => '']);
 
   global $settings;
   if (!empty($settings['acuity_encrypt_key1'])) {
@@ -626,6 +659,7 @@ function acuity_encrypt_admin_private_file_submit(array $_form, array &$form_sta
     ->set('key_storage_method', 'private_file')
     ->set('external_file_path', '')
     ->save();
+  _acuity_encrypt_registry_set_slot(1, ['storage' => 'private_file', 'external_path' => '']);
 
   _acuity_encrypt_save_private_key($form_state['values']['private_key_value'] ?? '');
 }
@@ -673,8 +707,265 @@ function acuity_encrypt_admin_external_file_submit(array $_form, array &$form_st
     ->set('key_storage_method', 'external_file')
     ->set('external_file_path', $path)
     ->save();
+  _acuity_encrypt_registry_set_slot(1, ['storage' => 'external_file', 'external_path' => $path]);
 
   backdrop_set_message(t('Storage method set to external file at <code>@path</code>.', ['@path' => $path]));
+}
+
+// ── Slot management (Phase 2) ─────────────────────────────────────────────────
+
+/**
+ * Form callback: add or edit a key slot.
+ *
+ * @param string|null $slot_arg
+ *   Slot id from the URL when editing, NULL when adding.
+ */
+function acuity_encrypt_slot_form(array $form, array &$form_state, string|null $slot_arg = NULL): array {
+  $registry = acuity_encrypt_slots();
+  $is_new = $slot_arg === NULL;
+
+  if ($is_new) {
+    $slot_id = max(array_keys($registry['slots'])) + 1;
+    $info = ['label' => '', 'storage' => 'settings_php', 'external_path' => ''];
+    backdrop_set_title(t('Add key slot @id', ['@id' => $slot_id]));
+  }
+  else {
+    $slot_id = (int) $slot_arg;
+    if (!isset($registry['slots'][$slot_id])) {
+      backdrop_not_found();
+      backdrop_exit();
+    }
+    $info = $registry['slots'][$slot_id];
+    backdrop_set_title(t('Edit key slot @id', ['@id' => $slot_id]));
+  }
+
+  $form_state['slot_id'] = $slot_id;
+  $form_state['is_new'] = $is_new;
+
+  $form['#attached'] = [
+    'js'  => [backdrop_get_path('module', 'acuity_encrypt') . '/js/acuity_encrypt.admin.js'],
+    'css' => [backdrop_get_path('module', 'acuity_encrypt') . '/css/acuity_encrypt.css'],
+  ];
+
+  if (!$is_new) {
+    $counts = acuity_encrypt_slot_value_counts();
+    $count = $counts['slots'][$slot_id] ?? 0;
+    if ($count > 0) {
+      $form['data_warning'] = [
+        '#markup' => '<p class="messages warning">' . format_plural(
+          $count,
+          'The key in this slot protects 1 encrypted database entry (a stored field value; revision copies are counted too). Changing the storage method is fine as long as the SAME key ends up readable from the new location — pointing this slot at a different key makes that data unreadable.',
+          'The key in this slot protects @count encrypted database entries (stored field values, including revision copies — not @count separate keys). Changing the storage method is fine as long as the SAME key ends up readable from the new location — pointing this slot at a different key makes that data unreadable.'
+        ) . '</p>',
+      ];
+    }
+  }
+
+  $form['label'] = [
+    '#type'          => 'textfield',
+    '#title'         => t('Label'),
+    '#description'   => t('Shown in the slot table — e.g. "2026 rotation".'),
+    '#default_value' => $info['label'],
+    '#maxlength'     => 64,
+    '#required'      => TRUE,
+  ];
+
+  $form['storage'] = [
+    '#type'          => 'radios',
+    '#title'         => t('Key storage method'),
+    '#options'       => [
+      'settings_php'  => t('settings.php — add <code>$settings[\'acuity_encrypt_key@id\']</code> manually (recommended)', ['@id' => $slot_id]),
+      'private_file'  => t('Private files — module writes <code>private://keys/acuity_encrypt_key@id.key</code>', ['@id' => $slot_id]),
+      'external_file' => t('External file — you provide an absolute path outside the webroot'),
+    ],
+    '#default_value' => $info['storage'],
+  ];
+
+  $form['generate'] = [
+    '#markup' => '<div class="acuity-generate-wrap" data-mode="settings_php" data-slot="' . $slot_id . '">'
+      . '<p><strong>' . t('Need a key? Generate one:') . '</strong></p>'
+      . '<button type="button" class="button acuity-generate-key-btn">' . t('Generate key') . '</button>'
+      . '<div class="acuity-generated-area" style="display:none;margin-top:0.8em">'
+      . '<p class="description" style="color:#c00"><strong>' . t('Copy this to your password manager NOW.') . '</strong> '
+      . t('For settings.php storage, paste the whole line into settings.php. For file storage, paste just the key part into the field below / your key file.') . '</p>'
+      . '<textarea class="acuity-key-line" readonly rows="2" style="width:100%;max-width:700px;font-family:monospace;font-size:0.85em"></textarea>'
+      . '<br><button type="button" class="button acuity-copy-key-btn" style="margin-top:4px">' . t('Copy') . '</button>'
+      . '<span class="acuity-copy-feedback" style="display:none;margin-left:8px;color:green">' . t('Copied!') . '</span>'
+      . '</div></div>',
+  ];
+
+  $form['private_key_value'] = [
+    '#type'        => 'textfield',
+    '#title'       => t('Key value (private files only)'),
+    '#description' => t('The key to write to the private key file. Leave blank to keep an existing key file, or to auto-generate a new one on save.'),
+    '#size'        => 70,
+    '#maxlength'   => 512,
+    '#attributes'  => ['autocomplete' => 'off'],
+    '#states'      => [
+      'visible' => [':input[name="storage"]' => ['value' => 'private_file']],
+    ],
+  ];
+
+  $priv_realpath = _acuity_encrypt_private_key_realpath($slot_id);
+  if ($priv_realpath && file_exists($priv_realpath)) {
+    $form['confirm_overwrite'] = [
+      '#type'   => 'checkbox',
+      '#title'  => t('A key file already exists for this slot. I understand that saving a DIFFERENT key makes data encrypted with the current key permanently unreadable.'),
+      '#states' => [
+        'visible' => [':input[name="storage"]' => ['value' => 'private_file']],
+      ],
+    ];
+  }
+
+  $form['external_path'] = [
+    '#type'          => 'textfield',
+    '#title'         => t('Full path to key file (external file only)'),
+    '#default_value' => $info['external_path'],
+    '#description'   => t('Absolute server path outside the webroot, e.g. <code>/home/username/private/keys/acuity_encrypt_key@id.key</code>.', ['@id' => $slot_id]),
+    '#size'          => 80,
+    '#maxlength'     => 512,
+    '#attributes'    => ['autocomplete' => 'off'],
+    '#states'        => [
+      'visible' => [':input[name="storage"]' => ['value' => 'external_file']],
+    ],
+  ];
+
+  $form['actions'] = ['#type' => 'actions'];
+  $form['actions']['submit'] = [
+    '#type'  => 'submit',
+    '#value' => $is_new ? t('Add slot') : t('Save slot'),
+  ];
+  $form['actions']['cancel'] = [
+    '#markup' => l(t('Cancel'), 'admin/config/acuity-utils/acuity_encrypt'),
+  ];
+
+  return $form;
+}
+
+/**
+ * Validate handler for the slot form.
+ */
+function acuity_encrypt_slot_form_validate(array $form, array &$form_state): void {
+  $values = $form_state['values'];
+  $slot_id = $form_state['slot_id'];
+
+  if ($values['storage'] === 'external_file') {
+    $path = trim($values['external_path']);
+    if ($path === '') {
+      form_set_error('external_path', t('Enter the full path to the key file.'));
+      return;
+    }
+    if (!file_exists($path)) {
+      form_set_error('external_path', t('No file found at %path — create the file first.', ['%path' => $path]));
+      return;
+    }
+    if (!is_readable($path)) {
+      form_set_error('external_path', t('The file at %path cannot be read by the web server.', ['%path' => $path]));
+      return;
+    }
+    $webroot = backdrop_realpath(BACKDROP_ROOT);
+    $real = realpath($path);
+    if ($webroot && $real && strpos($real, $webroot) === 0) {
+      form_set_error('external_path', t('The path %path is inside the webroot and could be served over HTTP. Choose a location outside the webroot.', ['%path' => $path]));
+    }
+  }
+
+  if ($values['storage'] === 'private_file') {
+    $new_key = trim($values['private_key_value'] ?? '');
+    $realpath = _acuity_encrypt_private_key_realpath($slot_id);
+    if ($new_key !== '' && $realpath && file_exists($realpath)) {
+      $existing = trim((string) file_get_contents($realpath));
+      if ($existing !== '' && $existing !== $new_key && empty($values['confirm_overwrite'])) {
+        form_set_error('confirm_overwrite', t('A key is already saved for this slot. Tick the confirmation checkbox to replace it.'));
+      }
+    }
+  }
+}
+
+/**
+ * Submit handler for the slot form.
+ */
+function acuity_encrypt_slot_form_submit(array $form, array &$form_state): void {
+  $values = $form_state['values'];
+  $slot_id = $form_state['slot_id'];
+
+  _acuity_encrypt_registry_set_slot($slot_id, [
+    'label' => trim($values['label']),
+    'storage' => $values['storage'],
+    'external_path' => $values['storage'] === 'external_file' ? trim($values['external_path']) : '',
+  ]);
+
+  if ($values['storage'] === 'private_file') {
+    _acuity_encrypt_save_private_key(trim($values['private_key_value'] ?? ''), $slot_id);
+  }
+
+  if ($values['storage'] === 'settings_php' && _acuity_encrypt_get_key($slot_id) === NULL) {
+    backdrop_set_message(t(
+      'Slot @id saved. It becomes usable once you add <code>$settings[\'acuity_encrypt_key@id\'] = \'your-key\';</code> to settings.php.',
+      ['@id' => $slot_id]
+    ), 'warning');
+  }
+  else {
+    backdrop_set_message(t('Key slot @id saved.', ['@id' => $slot_id]));
+  }
+
+  // Keep the legacy single-slot settings in sync when editing slot 1 so the
+  // guided "Set keys" tab and older tooling keep reporting the truth.
+  if ($slot_id === 1) {
+    config('acuity_encrypt.settings')
+      ->set('key_storage_method', $values['storage'])
+      ->set('external_file_path', $values['storage'] === 'external_file' ? trim($values['external_path']) : '')
+      ->save();
+  }
+
+  $form_state['redirect'] = 'admin/config/acuity-utils/acuity_encrypt';
+}
+
+/**
+ * Form callback: confirm making a slot the active one.
+ */
+function acuity_encrypt_slot_activate_confirm(array $form, array &$form_state, string $slot_arg): array {
+  $registry = acuity_encrypt_slots();
+  $slot_id = (int) $slot_arg;
+
+  if (!isset($registry['slots'][$slot_id])) {
+    backdrop_not_found();
+    backdrop_exit();
+  }
+  if (_acuity_encrypt_get_key($slot_id) === NULL) {
+    $form['error'] = [
+      '#markup' => '<p class="messages error">' . t(
+        'Slot @id has no key configured — it cannot be made active. Configure its key first.',
+        ['@id' => $slot_id]
+      ) . '</p><p>' . l(t('Back to key slots'), 'admin/config/acuity-utils/acuity_encrypt') . '</p>',
+    ];
+    return $form;
+  }
+
+  $form_state['slot_id'] = $slot_id;
+  return confirm_form(
+    $form,
+    t('Make slot @id ("@label") the active encryption slot?', ['@id' => $slot_id, '@label' => $registry['slots'][$slot_id]['label']]),
+    'admin/config/acuity-utils/acuity_encrypt',
+    t('All NEW encryptions will use this slot (enc@id: prefix). Existing data stays on its current slot and still decrypts normally — run "Rotate keys" afterwards to migrate it. Make sure this slot\'s key is backed up before proceeding.', ['@id' => $slot_id]),
+    t('Set active'),
+    t('Cancel')
+  );
+}
+
+/**
+ * Submit handler for the activate confirmation.
+ */
+function acuity_encrypt_slot_activate_confirm_submit(array $form, array &$form_state): void {
+  $slot_id = $form_state['slot_id'];
+  config_set('acuity_encrypt.slots', 'active_slot', $slot_id);
+  backdrop_static_reset('acuity_encrypt_slots');
+  watchdog('acuity_encrypt', 'Active key slot changed to @id.', ['@id' => $slot_id], WATCHDOG_NOTICE);
+  backdrop_set_message(t('Slot @id is now active — all new encryptions use it. To move existing data onto it, <a href="@url">rotate keys</a>.', [
+    '@id' => $slot_id,
+    '@url' => url('admin/config/acuity-utils/acuity_encrypt/rotate'),
+  ]));
+  $form_state['redirect'] = 'admin/config/acuity-utils/acuity_encrypt';
 }
 
 // ── Private file write helper ─────────────────────────────────────────────────

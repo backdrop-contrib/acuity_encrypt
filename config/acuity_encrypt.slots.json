@@ -1,0 +1,11 @@
+{
+  "_config_name": "acuity_encrypt.slots",
+  "active_slot": 1,
+  "slots": {
+    "1": {
+      "label": "Default",
+      "storage": "settings_php",
+      "external_path": ""
+    }
+  }
+}

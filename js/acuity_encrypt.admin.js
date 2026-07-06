@@ -33,9 +33,11 @@
           return ('0' + b.toString(16)).slice(-2);
         }).join('');
 
-        // Set the textarea value based on mode.
+        // Set the textarea value based on mode. data-slot selects which key
+        // slot the settings.php line targets (defaults to slot 1).
+        var slot = $wrap.data('slot') || 1;
         if (mode === 'settings_php') {
-          $wrap.find('.acuity-key-line').val("$settings['acuity_encrypt_key1'] = '" + key + "';");
+          $wrap.find('.acuity-key-line').val("$settings['acuity_encrypt_key" + slot + "'] = '" + key + "';");
         } else {
           // private_file or external_file: show raw key.
           $wrap.find('.acuity-key-line').val(key);

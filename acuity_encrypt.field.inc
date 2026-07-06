@@ -134,15 +134,26 @@ function acuity_encrypt_field_widget_form(array &$_form, array &$_form_state, ar
 
   // ── Single-line text ───────────────────────────────────────────────────────
 
+  // The ENCRYPTED value must fit the field's column, so the usable plaintext
+  // limit is smaller than the field's max_length (~1.34x inflation + 45
+  // fixed chars). Enforce it here: #maxlength stops most over-typing, the
+  // element validator is the byte-accurate authority (multibyte input can
+  // pass #maxlength but still exceed the byte limit).
+  $max_length = !empty($field['settings']['max_length']) ? (int) $field['settings']['max_length'] : 255;
+  $plain_limit = acuity_encrypt_max_plaintext_bytes($max_length);
+
   $element['value'] = [
     '#type'          => 'textfield',
     '#title'         => $element['#title'],
-    '#description'   => $element['#description'],
+    '#description'   => trim(($element['#description'] ? $element['#description'] . ' ' : '')
+      . t('Encrypted field — maximum @count characters (fewer if using accented or non-Latin characters).', ['@count' => $plain_limit])),
     '#required'      => $element['#required'],
     '#default_value' => $stored,
     '#size'          => 60,
-    '#maxlength'     => !empty($field['settings']['max_length']) ? (int) $field['settings']['max_length'] : 255,
+    '#maxlength'     => min($max_length, max(1, $plain_limit)),
     '#attributes'    => ['class' => ['text-full']],
+    '#acuity_encrypt_max_bytes' => $plain_limit,
+    '#element_validate' => ['acuity_encrypt_widget_length_validate'],
   ];
 
   // Empty field — show the real input unmasked.
@@ -186,6 +197,28 @@ function acuity_encrypt_field_widget_form(array &$_form, array &$_form_state, ar
   $element['value']['#suffix'] = '</div>';
 
   return $element;
+}
+
+/**
+ * Element validate: reject plaintext whose ENCRYPTED form exceeds the column.
+ *
+ * Byte-accurate (strlen), unlike #maxlength which counts characters. Without
+ * this, an over-long value reaches the database where — depending on SQL
+ * mode — the save fails outright or the ciphertext is silently truncated
+ * and becomes permanently undecryptable.
+ */
+function acuity_encrypt_widget_length_validate(array $element, array &$form_state): void {
+  $value = (string) $element['#value'];
+  if ($value === '') {
+    return;
+  }
+  $limit = (int) $element['#acuity_encrypt_max_bytes'];
+  if (strlen($value) > $limit) {
+    form_error($element, t(
+      '%title: too long to encrypt — this field can hold at most @limit bytes of text once encryption overhead is added (you entered @actual bytes). Shorten the value, or ask an administrator to raise the field\'s maximum length.',
+      ['%title' => $element['#title'], '@limit' => $limit, '@actual' => strlen($value)]
+    ));
+  }
 }
 
 // ── Display formatters ────────────────────────────────────────────────────────
@@ -378,6 +411,25 @@ function acuity_encrypt_field_attach_presave(string $entity_type, object $entity
         if (!empty($item['value']) && !acuity_encrypt_is_encrypted($item['value'])) {
           $enc = acuity_encrypt_encrypt($item['value']);
           if ($enc !== FALSE) {
+            // Fail-closed guard for single-line text: the ciphertext must fit
+            // the column. Form submissions are caught earlier by the widget
+            // validator; this protects programmatic saves (Feeds, custom
+            // code), where the alternatives are a strict-mode SQL error or —
+            // worse — silent truncation into undecryptable ciphertext.
+            if ($field['type'] === 'text') {
+              $max_length = !empty($field['settings']['max_length']) ? (int) $field['settings']['max_length'] : 255;
+              if (strlen($enc) > $max_length) {
+                watchdog('acuity_encrypt',
+                  'Presave blocked: encrypted value for field @field (@len chars) exceeds its column length (@max). Plaintext limit is @limit bytes.',
+                  ['@field' => $field_name, '@len' => strlen($enc), '@max' => $max_length, '@limit' => acuity_encrypt_max_plaintext_bytes($max_length)],
+                  WATCHDOG_ERROR
+                );
+                throw new LengthException(format_string(
+                  'acuity_encrypt: value for field @field is too long to encrypt within its @max-character column (plaintext limit @limit bytes). Shorten the value or raise the field maximum length.',
+                  ['@field' => $field_name, '@max' => $max_length, '@limit' => acuity_encrypt_max_plaintext_bytes($max_length)]
+                ));
+              }
+            }
             $item['value'] = $enc;
           }
         }

@@ -34,19 +34,21 @@ module_load_include('inc', 'acuity_encrypt', 'acuity_encrypt.actions');
  * Ciphertext format: enc{slot}:base64(iv[12] . tag[16] . ciphertext)
  * Example:           enc1:AAECAwQFBgcICQoL...
  *
- * The slot number identifies which key was used, allowing future support for
- * multiple keys or key rotation without re-encrypting all existing data.
- * Currently only slot 1 is used; new slots can be added later.
+ * The slot number identifies which key was used, so decryption always picks
+ * the right key automatically — including during and after key rotation.
  *
  * @param string $plaintext
  *   The value to encrypt.
- * @param int $slot
- *   Key slot identifier (default 1). Reserved for future multi-key support.
+ * @param int|null $slot
+ *   Key slot identifier, or NULL (default) to use the current active slot.
  *
  * @return string|false
  *   'enc{slot}:' + base64(iv . tag . ciphertext), or FALSE on failure.
  */
-function acuity_encrypt_encrypt(string $plaintext, int $slot = 1): string|false {
+function acuity_encrypt_encrypt(string $plaintext, int|null $slot = NULL): string|false {
+  if ($slot === NULL) {
+    $slot = acuity_encrypt_active_slot();
+  }
   $key = _acuity_encrypt_get_key($slot);
   if (!$key) {
     watchdog('acuity_encrypt', 'Encryption failed: no key configured for slot @slot.', ['@slot' => $slot], WATCHDOG_ERROR);
@@ -114,6 +116,81 @@ function acuity_encrypt_decrypt(string $ciphertext): string|false {
 }
 
 /**
+ * Encrypts a plaintext string with a caller-supplied key (AES-256-GCM).
+ *
+ * Same construction as acuity_encrypt_encrypt() but the caller owns the key
+ * and the wire prefix: the return value is bare base64(iv . tag . ciphertext)
+ * with NO 'enc{slot}:' prefix. Callers add their own prefix (e.g.
+ * acuity_secure_link uses 'tok:' for token-derived-key payloads) so their
+ * ciphertext can never be mistaken for slot-keyed ciphertext.
+ *
+ * @param string $plaintext
+ *   The value to encrypt.
+ * @param string $key
+ *   Exactly 32 bytes of key material (e.g. from hash_hkdf()). Not a
+ *   passphrase — no key derivation is applied here.
+ *
+ * @return string|false
+ *   base64(iv[12] . tag[16] . ciphertext), or FALSE on failure.
+ */
+function acuity_encrypt_encrypt_with_key(string $plaintext, string $key): string|false {
+  if (strlen($key) !== 32) {
+    watchdog('acuity_encrypt', 'encrypt_with_key: key must be exactly 32 bytes, got @len.', ['@len' => strlen($key)], WATCHDOG_ERROR);
+    return FALSE;
+  }
+
+  $iv  = random_bytes(12);
+  $tag = '';
+  $ciphertext = openssl_encrypt(
+    $plaintext,
+    'aes-256-gcm',
+    $key,
+    OPENSSL_RAW_DATA,
+    $iv,
+    $tag,
+    '',
+    16,
+  );
+
+  if ($ciphertext === FALSE) {
+    watchdog('acuity_encrypt', 'openssl_encrypt() failed in encrypt_with_key.', [], WATCHDOG_ERROR);
+    return FALSE;
+  }
+
+  return base64_encode($iv . $tag . $ciphertext);
+}
+
+/**
+ * Decrypts a string produced by acuity_encrypt_encrypt_with_key().
+ *
+ * @param string $encoded
+ *   The bare base64(iv . tag . ciphertext) string — strip any caller-added
+ *   wire prefix before passing it in.
+ * @param string $key
+ *   The same 32 bytes of key material used to encrypt.
+ *
+ * @return string|false
+ *   The original plaintext, or FALSE if decryption or tag verification fails.
+ */
+function acuity_encrypt_decrypt_with_key(string $encoded, string $key): string|false {
+  if (strlen($key) !== 32) {
+    return FALSE;
+  }
+
+  $raw = base64_decode($encoded, TRUE);
+  // Minimum valid length: 12 (IV) + 16 (tag) = 28 bytes before ciphertext.
+  if ($raw === FALSE || strlen($raw) < 28) {
+    return FALSE;
+  }
+
+  $iv   = substr($raw, 0, 12);
+  $tag  = substr($raw, 12, 16);
+  $data = substr($raw, 28);
+
+  return openssl_decrypt($data, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+}
+
+/**
  * Returns TRUE if a value was produced by acuity_encrypt_encrypt().
  *
  * Checks the 'enc{digits}:' prefix AND that the remainder is valid base64
@@ -155,6 +232,33 @@ function acuity_encrypt_get_slot(string $ciphertext): int|null {
  */
 function acuity_encrypt_key_available(): bool {
   return _acuity_encrypt_get_key() !== NULL;
+}
+
+/**
+ * Returns the maximum plaintext BYTES that fit a column once encrypted.
+ *
+ * Stored format is 'enc{slot}:' + base64(iv[12] . tag[16] . ciphertext) and
+ * GCM ciphertext length equals plaintext length, so:
+ *   stored = prefix + 4 * ceil((28 + N) / 3)
+ * Solving stored <= $max_length for N gives the limit below.
+ *
+ * Note this is bytes, not characters — multibyte UTF-8 characters count as
+ * 2–4 bytes each.
+ *
+ * @param int $max_length
+ *   The field/column maximum length (e.g. 255 for default text fields).
+ * @param int|null $slot
+ *   Slot whose prefix length to allow for; NULL = active slot.
+ *
+ * @return int
+ *   Maximum plaintext bytes (0 if the column cannot hold any ciphertext).
+ */
+function acuity_encrypt_max_plaintext_bytes(int $max_length, int|null $slot = NULL): int {
+  if ($slot === NULL) {
+    $slot = acuity_encrypt_active_slot();
+  }
+  $prefix_length = strlen('enc' . $slot . ':');
+  return max(0, ((int) floor(($max_length - $prefix_length) / 4)) * 3 - 28);
 }
 
 // ── Hook implementations ──────────────────────────────────────────────────────
@@ -217,7 +321,80 @@ function acuity_encrypt_menu(): array {
     'delivery callback'=> 'backdrop_json_output',
   ];
 
+  // ── Slot management (Phase 2) ─────────────────────────────────────────────
+
+  $items['admin/config/acuity-utils/acuity_encrypt/slots/add'] = [
+    'title'            => 'Add key slot',
+    'page callback'    => 'backdrop_get_form',
+    'page arguments'   => ['acuity_encrypt_slot_form'],
+    'access arguments' => ['administer acuity_encrypt'],
+    'file'             => 'acuity_encrypt.admin.inc',
+    'type'             => MENU_CALLBACK,
+  ];
+
+  $items['admin/config/acuity-utils/acuity_encrypt/slots/%/edit'] = [
+    'title'            => 'Edit key slot',
+    'page callback'    => 'backdrop_get_form',
+    'page arguments'   => ['acuity_encrypt_slot_form', 5],
+    'access arguments' => ['administer acuity_encrypt'],
+    'file'             => 'acuity_encrypt.admin.inc',
+    'type'             => MENU_CALLBACK,
+  ];
+
+  $items['admin/config/acuity-utils/acuity_encrypt/slots/%/activate'] = [
+    'title'            => 'Set active key slot',
+    'page callback'    => 'backdrop_get_form',
+    'page arguments'   => ['acuity_encrypt_slot_activate_confirm', 5],
+    'access arguments' => ['administer acuity_encrypt'],
+    'file'             => 'acuity_encrypt.admin.inc',
+    'type'             => MENU_CALLBACK,
+  ];
+
+  $items['admin/config/acuity-utils/acuity_encrypt/rotate'] = [
+    'title'            => 'Rotate encryption keys',
+    'page callback'    => 'backdrop_get_form',
+    'page arguments'   => ['acuity_encrypt_rotate_form'],
+    'access arguments' => ['administer acuity_encrypt'],
+    'file'             => 'acuity_encrypt.rotate.inc',
+    'type'             => MENU_CALLBACK,
+  ];
+
   return $items;
+}
+
+/**
+ * Implements hook_init().
+ *
+ * Shows a prominent warning on ALL admin pages when encrypted data exists
+ * whose key slot has no key configured. Reads a cheap state flag maintained
+ * by acuity_encrypt_slot_value_counts() (recomputed on cron, on the keys
+ * overview page, and after rotation) — no counting queries run here.
+ */
+function acuity_encrypt_init(): void {
+  if (!function_exists('path_is_admin') || !path_is_admin(current_path())) {
+    return;
+  }
+  if (!user_access('administer acuity_encrypt')) {
+    return;
+  }
+
+  $missing = state_get('acuity_encrypt_missing_key_slots', []);
+  if (!empty($missing)) {
+    backdrop_set_message(t(
+      '<strong>Encrypted data cannot be read:</strong> key slot(s) @slots have encrypted values in the database but no key configured. Restore the key(s) immediately — without them that data is unreadable. <a href="@url">Encryption Settings</a>',
+      ['@slots' => implode(', ', $missing), '@url' => url('admin/config/acuity-utils/acuity_encrypt')]
+    ), 'error', FALSE);
+  }
+}
+
+/**
+ * Implements hook_cron().
+ *
+ * Recomputes per-slot value counts so the admin-page missing-key warning
+ * stays current even if nobody visits the keys overview page.
+ */
+function acuity_encrypt_cron(): void {
+  acuity_encrypt_slot_value_counts();
 }
 
 /**
@@ -247,6 +424,10 @@ function acuity_encrypt_config_info(): array {
       'label' => t('Acuity Encrypt settings'),
       'group' => t('Configuration'),
     ],
+    'acuity_encrypt.slots' => [
+      'label' => t('Acuity Encrypt key slot registry'),
+      'group' => t('Configuration'),
+    ],
   ];
 }
 
@@ -256,12 +437,11 @@ function acuity_encrypt_config_info(): array {
  * Returns a 32-byte binary key for the given slot, or NULL if unavailable.
  *
  * Priority order:
- *   1. $settings['acuity_encrypt_key'] in settings.php — always checked first.
- *      For future multi-key support, slot 1 maps to 'acuity_encrypt_key' and
- *      slot N maps to 'acuity_encrypt_key_N'.
- *   2. The storage method configured on the admin page:
- *      a. 'external_file' — absolute path set by admin; file created manually.
- *      b. 'private_file'  — private://keys/acuity_encrypt.key, written via UI.
+ *   1. $settings['acuity_encrypt_key{slot}'] in settings.php — always checked
+ *      first for every slot, regardless of the slot's registered storage.
+ *   2. The storage registered for the slot in acuity_encrypt.slots.json:
+ *      a. 'external_file' — per-slot absolute path; file created manually.
+ *      b. 'private_file'  — private://keys/acuity_encrypt_key{slot}.key.
  *
  * Keys are hashed with SHA-256 to a fixed 32-byte AES key, so any length
  * passphrase or hex string is acceptable as the raw value.
@@ -269,7 +449,7 @@ function acuity_encrypt_config_info(): array {
  * Keys are never stored in CMI config or the database.
  *
  * @param int $slot
- *   Key slot identifier. Currently only slot 1 is used.
+ *   Key slot identifier.
  */
 function _acuity_encrypt_get_key(int $slot = 1): string|null {
   global $settings;
@@ -282,11 +462,15 @@ function _acuity_encrypt_get_key(int $slot = 1): string|null {
     return hash('sha256', $settings[$settings_key_name], TRUE);
   }
 
-  $method = config_get('acuity_encrypt.settings', 'key_storage_method') ?: 'settings_php';
+  $registry = acuity_encrypt_slots();
+  if (!isset($registry['slots'][$slot])) {
+    return NULL;
+  }
+  $storage = $registry['slots'][$slot]['storage'];
 
-  // 2a. External file — path stored in config, key content is in the file.
-  if ($method === 'external_file') {
-    $path = config_get('acuity_encrypt.settings', 'external_file_path');
+  // 2a. External file — per-slot path stored in the slot registry.
+  if ($storage === 'external_file') {
+    $path = $registry['slots'][$slot]['external_path'];
     if (!empty($path) && is_readable($path)) {
       $raw = trim(file_get_contents($path));
       if (!empty($raw)) {
@@ -297,7 +481,7 @@ function _acuity_encrypt_get_key(int $slot = 1): string|null {
   }
 
   // 2b. Private file — written by the module via the admin UI.
-  if ($method === 'private_file') {
+  if ($storage === 'private_file') {
     $uri      = 'private://keys/acuity_encrypt_key' . $slot . '.key';
     $realpath = backdrop_realpath($uri);
     if ($realpath && is_readable($realpath)) {
@@ -309,6 +493,207 @@ function _acuity_encrypt_get_key(int $slot = 1): string|null {
     return NULL;
   }
 
-  // settings_php method selected but key not found in settings.php.
+  // settings_php storage selected but key not found in settings.php.
   return NULL;
+}
+
+// ── Key slot registry ─────────────────────────────────────────────────────────
+
+/**
+ * Returns the slot registry: active slot id + per-slot storage config.
+ *
+ * Backed by acuity_encrypt.slots.json. When the registry is empty (site not
+ * yet migrated), slot 1 is synthesized from the legacy acuity_encrypt.settings
+ * keys so existing single-slot sites keep working unchanged.
+ *
+ * @return array
+ *   ['active_slot' => int, 'slots' => [id => [label, storage, external_path]]]
+ */
+function acuity_encrypt_slots(): array {
+  $registry = &backdrop_static(__FUNCTION__);
+  if ($registry !== NULL) {
+    return $registry;
+  }
+
+  $config = config('acuity_encrypt.slots');
+  $slots = $config->get('slots');
+  $active = (int) ($config->get('active_slot') ?: 1);
+
+  if (empty($slots)) {
+    $legacy = config('acuity_encrypt.settings');
+    $registry = [
+      'active_slot' => 1,
+      'slots' => [
+        1 => [
+          'label' => 'Default',
+          'storage' => $legacy->get('key_storage_method') ?: 'settings_php',
+          'external_path' => $legacy->get('external_file_path') ?: '',
+        ],
+      ],
+    ];
+    return $registry;
+  }
+
+  // JSON object keys arrive as strings; normalize and apply defaults.
+  $normalized = [];
+  foreach ($slots as $id => $info) {
+    $normalized[(int) $id] = (array) $info + [
+      'label' => 'Slot ' . $id,
+      'storage' => 'settings_php',
+      'external_path' => '',
+    ];
+  }
+  ksort($normalized);
+
+  if (!isset($normalized[$active])) {
+    $active = (int) array_key_first($normalized);
+  }
+
+  $registry = ['active_slot' => $active, 'slots' => $normalized];
+  return $registry;
+}
+
+/**
+ * Returns the active key slot id — the slot all new encryptions use.
+ */
+function acuity_encrypt_active_slot(): int {
+  $registry = acuity_encrypt_slots();
+  return $registry['active_slot'];
+}
+
+/**
+ * Writes (or merges) one slot's storage config into the registry.
+ *
+ * @param int $slot
+ *   Slot id.
+ * @param array $info
+ *   Any of: label, storage, external_path. Merged over existing values.
+ */
+function _acuity_encrypt_registry_set_slot(int $slot, array $info): void {
+  $registry = acuity_encrypt_slots();
+  $existing = $registry['slots'][$slot] ?? ['label' => 'Slot ' . $slot, 'storage' => 'settings_php', 'external_path' => ''];
+  $registry['slots'][$slot] = $info + $existing;
+
+  config('acuity_encrypt.slots')
+    ->set('active_slot', $registry['active_slot'])
+    ->set('slots', $registry['slots'])
+    ->save();
+  backdrop_static_reset('acuity_encrypt_slots');
+}
+
+/**
+ * Maps every field instance using the encrypt widget to its SQL storage.
+ *
+ * @return array
+ *   [field_name => ['columns' => [...], 'tables' => [data_table, revision_table]]]
+ */
+function acuity_encrypt_encrypted_field_map(): array {
+  $map = [];
+  foreach (field_info_fields() as $field_name => $field) {
+    if (!in_array($field['type'], ['text', 'text_long', 'text_with_summary'], TRUE)) {
+      continue;
+    }
+    $used = FALSE;
+    foreach (($field['bundles'] ?? []) as $entity_type => $bundles) {
+      foreach ($bundles as $bundle) {
+        $instance = field_info_instance($entity_type, $field_name, $bundle);
+        if ($instance && $instance['widget']['type'] === 'acuity_encrypt_widget') {
+          $used = TRUE;
+          break 2;
+        }
+      }
+    }
+    if (!$used) {
+      continue;
+    }
+    $columns = [$field_name . '_value'];
+    if ($field['type'] === 'text_with_summary') {
+      $columns[] = $field_name . '_summary';
+    }
+    $map[$field_name] = [
+      'columns' => $columns,
+      'tables' => ['field_data_' . $field_name, 'field_revision_' . $field_name],
+    ];
+  }
+  return $map;
+}
+
+/**
+ * Counts encrypted values per slot across all encrypted fields.
+ *
+ * Counts BOTH current (field_data_*) and revision (field_revision_*) rows —
+ * a slot's key can only be retired when its revisions are re-encrypted too.
+ * Counts are computed live from the database (they are environment facts,
+ * not config, so they are never stored in config exports); the result is
+ * cached in state for the cheap admin-page missing-key check.
+ *
+ * @return array
+ *   ['slots' => [slot_id => count], 'orphan' => int, 'total' => int]
+ *   'orphan' counts enc{N}: values whose slot N is not in the registry.
+ */
+function acuity_encrypt_slot_value_counts(): array {
+  $registry = acuity_encrypt_slots();
+  $slot_ids = array_keys($registry['slots']);
+  $counts = array_fill_keys($slot_ids, 0);
+  $total = 0;
+
+  foreach (acuity_encrypt_encrypted_field_map() as $info) {
+    foreach ($info['tables'] as $table) {
+      if (!db_table_exists($table)) {
+        continue;
+      }
+      foreach ($info['columns'] as $column) {
+        $total += (int) db_query(
+          "SELECT COUNT(*) FROM {" . $table . "} WHERE $column REGEXP :re",
+          [':re' => '^enc[0-9]+:']
+        )->fetchField();
+        foreach ($slot_ids as $sid) {
+          $counts[$sid] += (int) db_query(
+            "SELECT COUNT(*) FROM {" . $table . "} WHERE $column LIKE :prefix",
+            [':prefix' => 'enc' . $sid . ':%']
+          )->fetchField();
+        }
+      }
+    }
+  }
+
+  $result = [
+    'slots' => $counts,
+    'orphan' => max(0, $total - array_sum($counts)),
+    'total' => $total,
+  ];
+
+  // Refresh the cheap missing-key flag read by hook_init() on admin pages.
+  $missing = [];
+  foreach ($slot_ids as $sid) {
+    if ($counts[$sid] > 0 && _acuity_encrypt_get_key($sid) === NULL) {
+      $missing[] = $sid;
+    }
+  }
+  state_set('acuity_encrypt_missing_key_slots', $missing);
+  state_set('acuity_encrypt_orphan_values', $result['orphan']);
+
+  return $result;
+}
+
+/**
+ * Derives a slot's display status.
+ *
+ * @return string
+ *   'active'       — key available, this is the active slot.
+ *   'in_use'       — key available, holds data, not active. Key must stay.
+ *   'available'    — key available, zero values. Safe to retire or reuse.
+ *   'missing'      — DATA EXISTS but no key. Admin must restore it now.
+ *   'unconfigured' — no key and no data.
+ */
+function acuity_encrypt_slot_status(int $slot, array $counts): string {
+  $key_available = _acuity_encrypt_get_key($slot) !== NULL;
+  $count = $counts['slots'][$slot] ?? 0;
+  if (!$key_available) {
+    return $count > 0 ? 'missing' : 'unconfigured';
+  }
+  if ($slot === acuity_encrypt_active_slot()) {
+    return 'active';
+  }
+  return $count > 0 ? 'in_use' : 'available';
 }

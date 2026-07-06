@@ -1,237 +1,119 @@
 # Encryption (Acuity Utils)
+**Acuity Encrypt** — AES-256-GCM field encryption for Backdrop CMS with multi-slot key management and zero-downtime key rotation.
 
-AES-256-GCM field encryption for Backdrop CMS using PHP's built-in OpenSSL
-extension. No external library dependencies.
+Acuity Encrypt is a Backdrop CMS module that adds at-rest encryption to any standard text field using PHP's built-in OpenSSL extension — no external libraries. Encryption is enabled by selecting a custom widget in Field UI: no new field type, no data migration, no schema changes. Values are decrypted transparently on load, so Views, tokens, and search keep working, while database dumps expose nothing without the key. A public API (including caller-supplied-key variants) powers the companion `acuity_secure_link` and `acuity_secure_message` modules.
 
-Encryption is added to any existing standard text field by selecting a custom
-widget in Field UI — no new field type, no data migration, no schema changes.
+## Beta Release Notes
+As a beta release, the encryption core, field widget/formatters, key slot management, and hard rotation are fully functional and verified by CLI test harnesses against a live site (including rotation forward and back on real content with revisions). Browser click-through of the newer slot admin pages is still in progress. Before deploying to production, ensure your Backdrop CMS environment is running PHP 8.0+, clear your system caches after installation, and **back up your encryption key to a password manager before encrypting anything** — a lost key means permanently unreadable data.
 
 ## Features
 
-- **Zero external dependencies** — uses PHP's built-in `openssl_encrypt()`.
-- **AES-256-GCM** — authenticated encryption; tampered or corrupted ciphertext
-  is detected and rejected automatically.
-- **Encrypt any text field** — works on `text`, `text_long`, and
-  `text_with_summary` field types. Enable by selecting the widget in Manage
-  Fields; disable by switching back. Existing fields can be encrypted in-place.
-- **WYSIWYG support** — long text fields retain full CKEditor support. An overlay
-  mask hides the content until the author clicks "Reveal to edit".
-- **Click-to-reveal display** — shows `••••••` by default; a Reveal button
-  decrypts and shows the value in-page without a page reload.
-- **Permission-aware** — users without `view encrypted fields` see a locked
-  `••••••` placeholder on both display and edit. Their saves preserve the
-  encrypted value (no accidental overwrites).
-- **Transparent to consumers** — Views, tokens, search indexes, and Rules all
-  receive the decrypted plaintext automatically. Encryption is at-rest
-  protection (database dumps), not an access control mechanism.
-- **VBO bulk encryption** — Views Bulk Operations action to re-save entities in
-  bulk, encrypting any existing plain text values in one operation.
-- **Public API** — `acuity_encrypt_encrypt()` / `acuity_encrypt_decrypt()` for
-  use by other modules (e.g. `acuity_secure_message`).
-- **GDPR / UK DPA 2018** — database dumps without the key expose no sensitive
-  personal data.
+* **Encrypt any text field:** Works on `text`, `text_long`, and `text_with_summary` field types. Enable by selecting the **Acuity Encrypt (masked text)** widget in Manage Fields; disable by switching back. Existing fields can be encrypted in-place.
+* **AES-256-GCM authenticated encryption:** Fresh random IV per value, 16-byte authentication tag — tampered or corrupted ciphertext is detected and rejected automatically. Zero external dependencies (PHP's built-in `openssl`).
+* **Multi-slot key management:** Multiple key slots, each with its own independent storage method. Every ciphertext carries its slot id (`enc1:`, `enc2:` …) so the correct key is always used automatically, even mid-rotation.
+* **Zero-downtime key rotation:** Add a new slot, set it active (new encryptions switch instantly; old data still decrypts), then run the Hard Rotate batch to re-encrypt everything — **including revisions** — under the new key. The slot table's live entry counts tell you exactly when the old key is safe to retire.
+* **Missing-key alarm:** If encrypted data exists whose key slot has no key configured, a prominent error banner appears on every admin page until it is restored.
+* **Keys never touch the database:** Three storage methods per slot — `settings.php` (recommended), private filesystem, or an external file outside the webroot. Keys never appear in CMI config exports or database dumps.
+* **Click-to-reveal display:** Shows `••••••••` by default with a Reveal button that decrypts in-page. Users without the `view encrypted fields` permission see a locked placeholder on both display and edit, and their saves preserve the encrypted value.
+* **WYSIWYG support:** Long text fields retain full CKEditor support behind a "Reveal to edit" overlay mask.
+* **Encrypted-length guard:** Encryption inflates storage (~1.34 × plaintext + ~45 characters). The widget shows the effective limit, caps input, and byte-validates on submit; programmatic saves that would overflow the column are blocked with a clear exception instead of silently truncating into undecryptable data.
+* **Transparent to consumers:** Views, tokens, search indexes, and Rules all receive decrypted plaintext automatically. Encryption is at-rest protection (database dumps), not an access control mechanism.
+* **VBO bulk encryption:** Views Bulk Operations action to encrypt existing plain text values in one batch.
+* **Public API:** `acuity_encrypt_encrypt()` / `acuity_encrypt_decrypt()`, plus `_with_key()` variants for caller-supplied 32-byte keys (used by `acuity_secure_link` for token-derived per-link encryption).
+* **GDPR / UK DPA 2026:** Database dumps without the key expose no sensitive personal data.
+* **Backdrop Native:** Built exclusively for Backdrop CMS using strict PHP 8.0+ standards and Backdrop APIs throughout.
 
 ## Requirements
 
 - Backdrop CMS 1.x
-- PHP 8.0+
+- PHP 8.0+ (While the code may technically function with PHP 7.4 at this time, we strictly require PHP 8.0+ and will not address issues related to older PHP versions.)
 - PHP `openssl` extension (enabled by default in most PHP installs)
 - Views Bulk Operations module (optional — only needed for the bulk encryption action)
 
 ## Installation
 
-1. Place the `acuity_encrypt` directory in your `modules/` folder.
-2. Enable via **Administration › Modules**.
-3. Visit **Administration › Configuration › Acuity Utils › Encryption Settings**
-   and configure an encryption key (see Key Setup below).
-4. Grant the `view encrypted fields` permission to trusted roles.
+Install this module using the official Backdrop CMS instructions at https://docs.backdropcms.org/documentation/extend-with-modules
 
-## Setting up an encrypted field
+Enable the module, then clear your system caches to register the admin menu items.
 
-### Step 1 — Select the widget
+## Configuration
 
-Go to **Administration › Structure › Content types › [Type] › Manage fields**.
+1. Navigate to **Admin → Configuration → Acuity Utils → Encryption Settings → Set keys** and configure a key for Slot 1 using one of the three storage methods. Each section has inline step-by-step instructions and a **Generate key** button.
+2. **Back up the key immediately** using the reveal panel — copy it to a password manager (e.g. Bitwarden). A database backup without the key is unreadable; losing the key makes all encrypted values permanently unrecoverable.
+3. Grant the `view encrypted fields` permission to trusted roles at **Admin → People → Permissions**. Neither of this module's permissions is granted to any role by default.
+4. Go to **Admin → Structure → Content types → [Type] → Manage fields** and change the widget of any text field to **Acuity Encrypt (masked text)**. All future saves encrypt the value.
+5. Under **Manage display**, select **Acuity Encrypt: masked with reveal button** (or the plain decrypted formatter) for the field.
+6. To encrypt values that existed before you enabled the widget, run the included VBO action **Acuity Encrypt: encrypt existing field values** from a View with bulk operations, then verify `enc1:` ciphertext in the database.
 
-In the **Widget** column for any text, long text, or text with summary field,
-change the widget to **Acuity Encrypt (masked text)**. Save.
+## Key Rotation
 
-That field is now encrypted. All future saves will encrypt the value. Existing
-values in the database remain plaintext until you run the VBO bulk action.
+Rotation moves all encrypted data from one key to another with no downtime:
 
-### Step 2 — Select the display formatter
+1. **Add a new slot** — View keys tab → *Add key slot*, with its own storage method.
+2. **Set it active** — new encryptions immediately use the new slot; existing data stays readable because every ciphertext carries its slot id.
+3. **Hard Rotate** — a batch re-encrypts every old-slot value (revisions included) under the active slot.
+4. When the old slot shows **Available** (zero entries), retire its key.
 
-Go to **Manage display** for the content type.
+The slot table shows live "encrypted entries" counts — stored field values including revision copies, not a count of keys. Never delete a key while its slot shows **In use** or **Missing**.
 
-Change the formatter for the encrypted field to **Acuity Encrypt: masked with
-reveal button**. Save.
+## Storage Overhead
 
-The field will show `••••••` on display, with a Reveal button for users who
-have the `view encrypted fields` permission.
+Encrypted values are stored as `enc{slot}:` + base64(IV + tag + ciphertext):
 
----
+    stored length ≈ (plaintext bytes × 1.34) + 45
 
-## Key Setup
+Roughly +33% for long text; proportionally more for short values. A default 255-character single-line text field holds at most ~158 bytes of plaintext — the module enforces this at input and at save (see Features).
 
-The encryption key is **never stored in the database or config exports**. Choose
-one of three storage methods at **Administration › Configuration › Acuity Utils
-› Encryption Settings › Set keys**. Full step-by-step instructions are shown
-on the page for each option.
+## Important Notes for Site Builders
 
-### Option 1 — settings.php (recommended)
-
-Add to your site's `settings.php` (in the root folder of your Backdrop site):
-
-```php
-$settings['acuity_encrypt_key1'] = 'replace-with-a-long-random-string';
-```
-
-Use the **Generate Key** button on the admin page to produce a
-cryptographically random key and a ready-to-paste `$settings[...]` line.
-
-This key never touches the database or config exports. Keep a separate copy
-somewhere safe (a password manager such as Bitwarden is recommended).
-
-### Option 2 — private filesystem
-
-The admin page writes the key to `private://keys/acuity_encrypt_key1.key`.
-The private files directory must be outside the webroot.
-
-### Option 3 — external file
-
-Place the key file anywhere on the server outside the webroot and enter the
-absolute path on the admin page. The path is stored in config; the key is not.
-Paths that resolve inside the webroot are rejected at save time — the key
-file must live outside the webroot so it can't be served over HTTP.
-
-### Key naming convention
-
-| Slot | settings.php key | File name |
-|------|-----------------|-----------|
-| 1 | `acuity_encrypt_key1` | `acuity_encrypt_key1.key` |
-| 2 | `acuity_encrypt_key2` | `acuity_encrypt_key2.key` |
-
-### Key backup
-
-**Back up your key separately from your database and config exports.**
-A database dump without the key is unreadable — which is the point — but
-losing the key makes all encrypted values permanently unrecoverable.
-
-The **Set keys** tab on the admin page reveals your active key behind a
-"Reveal key" click and prompts you to save it to a password manager. The key
-is fetched on demand via a token-protected request when you click Reveal —
-it is never embedded in the page itself, so it won't sit in page source,
-browser history, or HTTP-layer logging just from visiting the page.
-
-### Replacing an existing key
-
-There is no key rotation yet (Phase 2, not implemented) — replacing the key
-does not re-encrypt existing data. If you save a different key over one
-that's already in use, every value encrypted under the old key becomes
-permanently unreadable. The **Private files** section requires you to tick a
-confirmation checkbox before it will overwrite an existing key file, as a
-safeguard against doing this by accident.
-
----
-
-## Encrypting existing plain text data
-
-Use the included VBO bulk action after enabling the encrypt widget on a field
-that already has data:
-
-1. Create a View of the content type, add the **Bulk operations** field.
-2. Select all records, choose **Acuity Encrypt: encrypt existing field values**.
-3. Run the batch. Each record is re-saved; `hook_field_attach_presave()` encrypts
-   any plain text values in fields using the encrypt widget.
-4. Verify ciphertext (`enc1:...`) in the database.
-
-Note: re-saving updates the entity's `changed` timestamp.
-
----
-
-## Permissions
-
-| Permission | Purpose |
-|---|---|
-| `administer acuity_encrypt` | Access the key settings page |
-| `view encrypted fields` | Decrypt and reveal values on display and in edit forms |
-
-Both have `restrict access: TRUE` — not granted to any role by default.
-
----
-
-## Important notes for site builders
-
-**Switching the widget away from Acuity Encrypt** while the field has data
-will leave ciphertext (`enc1:...`) in the database. That ciphertext will be
-displayed raw by the standard text formatter. Re-enabling the widget restores
-normal behaviour.
-
-**Views, tokens, and search** receive decrypted plaintext. This is intentional —
-the encryption protects data at rest (database dumps), not data in use. Use
-Backdrop's role permissions and Views access rules to control who sees the
-content on screen.
-
-**Text format / HTML** is preserved through the encrypt/decrypt cycle. CKEditor
-output is encrypted as a string and decrypted back to the same HTML.
-
----
-
-## Admin page
-
-**Administration › Configuration › Acuity Utils › Encryption Settings**
-`admin/config/acuity-utils/acuity_encrypt`
-
-Two tabs:
-- **View keys** — slot table showing storage method, key identifier, and status.
-- **Set keys** — accordion form for configuring a key via any storage method.
-
----
+* **Switching the widget away** from Acuity Encrypt while the field has data leaves raw ciphertext displaying on the site. Re-enabling the widget restores normal behaviour.
+* **Views, tokens, and search receive plaintext** by design — use Backdrop's role permissions and Views access rules to control who sees content on screen. The `view encrypted fields` permission gates only this module's own widget and formatters.
+* **Text format / HTML is preserved** through the encrypt/decrypt cycle.
 
 ## Developer API
 
 ```php
-// Encrypt any string (uses slot 1 by default).
-$ciphertext = acuity_encrypt_encrypt('secret value');
-// Returns: 'enc1:base64encodeddata...' or FALSE on failure.
+$ciphertext = acuity_encrypt_encrypt('secret value');        // active slot
+$plaintext  = acuity_encrypt_decrypt($ciphertext);           // slot auto-detected
+acuity_encrypt_is_encrypted($value);                         // strict ciphertext test
+acuity_encrypt_get_slot($ciphertext);                        // int|NULL
+acuity_encrypt_key_available();                              // bool
+acuity_encrypt_max_plaintext_bytes($max_length);             // column fit limit
 
-// Decrypt. Slot is read from the ciphertext prefix automatically.
-$plaintext = acuity_encrypt_decrypt($ciphertext);
-// Returns: original string, or FALSE if key is wrong / data tampered.
+// Caller-supplied 32-byte key (no slot prefix on the wire format):
+$ct = acuity_encrypt_encrypt_with_key($plaintext, $key32);
+$pt = acuity_encrypt_decrypt_with_key($ct, $key32);
 
-// Test whether a value is already encrypted. Validates the base64 payload
-// and minimum length, not just the enc{slot}: prefix — a plaintext string
-// that happens to start with "enc1:" will correctly return FALSE here.
-if (acuity_encrypt_is_encrypted($value)) {
-  $plaintext = acuity_encrypt_decrypt($value);
-}
-
-// Check key availability before attempting encryption.
-if (!acuity_encrypt_key_available()) {
-  backdrop_set_message(t('Encryption key not configured.'), 'warning');
-}
-
-// Read the slot number from a ciphertext string.
-$slot = acuity_encrypt_get_slot($ciphertext); // int or NULL
+// Slot registry:
+acuity_encrypt_slots();                // active slot + per-slot storage
+acuity_encrypt_slot_value_counts();    // live per-slot entry counts
 ```
 
-### Ciphertext format
+Ciphertext wire format: `enc{slot}:base64( iv[12] . tag[16] . ciphertext )`
 
-```
-enc{slot}:base64( iv[12 bytes] . tag[16 bytes] . ciphertext )
-```
+## Issues
 
-Example: `enc1:AAECAwQFBgcICQoLDA0OD...`
+Bugs and feature requests should be reported in the Issue Queue: https://github.com/backdrop-contrib/acuity_encrypt/issues
 
-The slot prefix allows future key rotation: old ciphertext carries its slot so
-the correct key is always used automatically on decryption, even after a new
-active slot is set.
+## Current Maintainer(s)
+- Steve Moorhouse (albanycomputers) (https://github.com/albanycomputers)
+- Additional maintainers and contributors welcome.
 
----
+## Planned Features
+
+The following are on the roadmap but not yet implemented:
+
+* **File encryption (Phase 3):** Envelope encryption for uploaded files — per-file key wrapped by the active slot key, so rotation re-wraps tiny keys instead of re-encrypting gigabytes. Design agreed; see module notes.
+* **Field UI warning** when switching a field away from the encrypt widget while it holds ciphertext.
+* **Summary masking** in the edit widget for `text_with_summary` fields (the summary currently renders unmasked in the edit form).
+* **Per-field "last encrypted" timestamp** for audit trails.
+* **BEE rotate command** for running hard rotation from the command line.
+
+## Credits
+- Steve Moorhouse — Zulip (DrAlbany)
+- Assisted by AI.
+
+- Current development is sponsored by [Albany Computer Services](https://www.albany-computers.co.uk), providers of computer support, [web design](https://www.albanywebdesign.co.uk), and [web hosting](https://www.albany-hosting.co.uk).
 
 ## License
-
-GPL-2.0-or-later. See LICENSE.txt.
-
-## Maintainer
-
-Albany Computer Services — https://www.albany-computers.co.uk
+This project is GPL v2 or later software. See the LICENSE.txt file in this directory for complete text.

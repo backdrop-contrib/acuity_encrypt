@@ -1,5 +1,5 @@
 name = Encryption (Acuity Utils)
-description = AES-256-GCM field encryption using PHP's built-in OpenSSL — no external libraries. Provides an encrypted text field type with click-to-reveal display formatter, and a public API for use by other Acuity modules.
+description = AES-256-GCM field encryption using PHP's built-in OpenSSL — no external libraries. Encrypt any text field by selecting the Acuity Encrypt widget; includes click-to-reveal formatters, multi-slot key management with hard rotation, and a public API for other Acuity modules.
 
 type = module
 backdrop = 1.x

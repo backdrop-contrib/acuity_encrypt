@@ -5,6 +5,82 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## 1.x-0.3.0 (unreleased) — 2026-07-06
+
+Phase 2: key slot management and hard rotation. Built and verified with a
+32-assertion CLI test harness against a live site (rotation forward and
+back on real nodes including revisions).
+
+### Key slots
+
+- New `config/acuity_encrypt.slots.json` registry: active slot id plus
+  per-slot label and storage (settings.php / private file / external file —
+  each slot independent). Keys themselves still never touch config or DB.
+- `acuity_encrypt_encrypt()` slot parameter is now NULL-default and resolves
+  to the **active slot**; `_acuity_encrypt_get_key()` resolves any slot
+  (settings.php `acuity_encrypt_key{N}` always wins, then registered storage).
+- `acuity_encrypt_update_1000()` migrates existing single-slot sites; the
+  legacy "Set keys" accordion stays in sync with registry slot 1.
+- View keys tab rewritten: every slot with storage, key identifier, live
+  encrypted-entry count (data + revision tables), derived status (Active /
+  In use / Available / KEY MISSING / No key configured), and operations.
+  Orphan detection flags `enc{N}:` data whose slot is unregistered.
+- Add/Edit slot form with conditional storage fields (#states), per-slot
+  Generate key button (admin JS is now `data-slot` aware), webroot-path
+  rejection, and per-slot private-file overwrite confirmation.
+- Set active slot confirm form — blocked if the slot has no key.
+
+### Hard rotation
+
+- New `acuity_encrypt.rotate.inc`: Batch API re-encryption of every
+  `enc{from}:` value under the active slot, **including field_revision_***
+  tables (a key is only retirable once revisions are migrated too).
+- Direct `db_update()` on field tables — entity hooks, timestamps, and
+  revision history untouched; field + entity caches flushed on completion.
+- Optimistic old-value guard against concurrent edits; rows that fail to
+  decrypt are skipped permanently (no infinite loop), logged, and left
+  byte-for-byte untouched. Completion recount tells the admin when the
+  source slot is safe to retire.
+
+### Missing-key warning
+
+- Error banner on every admin page (for `administer acuity_encrypt` users)
+  when encrypted data exists whose slot has no key. Driven by a state flag
+  maintained by the counts function (refreshed on cron, the keys overview,
+  and rotation finish) — no counting queries on ordinary page loads.
+
+### Public API additions
+
+- `acuity_encrypt_encrypt_with_key()` / `acuity_encrypt_decrypt_with_key()` —
+  same AES-256-GCM construction with a caller-supplied 32-byte key and no
+  slot prefix. Used by acuity_secure_link for HKDF(token)-derived per-link
+  payload encryption.
+- `acuity_encrypt_slots()`, `acuity_encrypt_active_slot()`,
+  `acuity_encrypt_slot_value_counts()`, `acuity_encrypt_slot_status()`,
+  `acuity_encrypt_encrypted_field_map()`.
+
+### UI wording
+
+- Slot data counts are labelled "encrypted entries" (stored field values,
+  including revision copies) — previously "values", which read ambiguously
+  as a count of keys.
+
+### Encrypted-length guard (bug fix)
+
+- Encryption inflates storage (~1.34 × plaintext + ~45 chars), so on
+  single-line `text` fields an over-long plaintext produced ciphertext
+  exceeding the database column — failing the save in strict SQL mode or,
+  worse, silently truncating into permanently undecryptable data.
+- New `acuity_encrypt_max_plaintext_bytes($max_length, $slot)` computes the
+  effective plaintext byte limit (158 for the default 255-char field).
+- The widget now shows the limit in the field description, caps
+  `#maxlength`, and byte-validates on submit; `hook_field_attach_presave()`
+  throws a `LengthException` for over-long programmatic saves (Feeds,
+  custom code) instead of letting the database decide.
+- README documents the storage overhead formula for site builders.
+
+---
+
 ## 1.x-0.2.0 (unreleased)
 
 ### Security fixes (2026-07-02 audit)

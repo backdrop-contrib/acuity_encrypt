@@ -87,17 +87,34 @@ next release.
 
 ## Phase 1 follow-on (post-0.2.0, pre-Phase 2)
 
-- [ ] Build `acuity_secure_message` module
-      - Uses `acuity_encrypt_encrypt()` / `acuity_encrypt_decrypt()` API
-      - Stores message body encrypted at rest in a custom DB table
+Plan revised 2026-07-06: secure_message is now a consumer of a shared
+`acuity_secure_link` core (a generic tokenised-link engine; other consumers
+register their own link types). Design spec: `../acuity_secure_link/CLAUDE.md`;
+build checklist: `../acuity_secure_link/TODO.md`.
+
+- [x] **Add key-override variants to the public API** (done 2026-07-06;
+      standalone round-trip/tamper tests pass):
+      - `acuity_encrypt_encrypt_with_key(string $plaintext, string $key): string|false`
+      - `acuity_encrypt_decrypt_with_key(string $ciphertext, string $key): string|false`
+      - Same AES-256-GCM construction, caller supplies the 32-byte key;
+        no slot prefix (secure_link uses its own `tok:` wire prefix)
+- [x] Build `acuity_secure_link` core module (done 2026-07-06 — Phase A in
+      its TODO; in-Backdrop testing outstanding)
+- [ ] Build `acuity_secure_message` as secure_link consumer (Phase B)
       - Depends on acuity_encrypt being stable and tested
 
-- [ ] Update `.info` description to reflect widget-based approach
-      (current description still says "encrypted text field type")
+- [x] Update `.info` description to reflect widget-based approach and
+      Phase 2 slots/rotation (done 2026-07-06)
 
 - [ ] Add warning in Field UI when admin switches a field AWAY from the
       acuity_encrypt_widget while the field has data — existing ciphertext
       will display raw if the widget is changed.
+
+- [x] **Presave length guard for single-line `text` fields** (done
+      2026-07-06, 12-assertion CLI test): widget shows the effective limit
+      in its description, caps #maxlength, and byte-validates on submit;
+      presave throws LengthException for programmatic saves. Helper:
+      `acuity_encrypt_max_plaintext_bytes($max_length, $slot)`.
 
 - [ ] `text_with_summary` widget: handle summary masking in edit form
       (currently only `value` is masked; `summary` renders plain in widget)
@@ -107,19 +124,55 @@ next release.
 
 ---
 
-## Phase 2 — Key slot management (do not start until acuity_secure_message done)
+## Phase 2 — Key slot management (BUILT + CLI-TESTED 2026-07-06)
 
-Full design is in CLAUDE.md under "PHASE 2 — KEY SLOT MANAGEMENT".
+Full design + implementation notes in CLAUDE.md under "PHASE 2".
 
-- [ ] `config/acuity_encrypt.slots.json` — slot registry
-- [ ] View Keys tab: show all slots with status and encrypted-value counts
-- [ ] Add Slot form (same storage options as current Set Keys form)
-- [ ] Set Active slot
-- [ ] Hard Rotate batch (re-encrypt enc{old}: → enc{new}: in Batch API)
-- [ ] Missing key prominent warning (shown on any admin page if detected)
-- [ ] Slot value count maintenance on presave/delete
+- [x] `config/acuity_encrypt.slots.json` — slot registry (+ update_1000
+      migration for existing sites; legacy Set Keys accordion kept in sync)
+- [x] View Keys tab: all slots with status + live encrypted-value counts
+      (data AND revision tables; orphan-slot detection)
+- [x] Add/Edit Slot form (label, storage radios via #states, per-slot
+      generate button, external-path webroot rejection, private-file
+      overwrite confirmation)
+- [x] Set Active slot (confirm form; blocked if slot has no key)
+- [x] Hard Rotate batch (Batch API, 50 rows/pass, revisions included,
+      failure-safe, cache flush + recount on finish)
+- [x] Missing key prominent warning on all admin pages (state flag,
+      refreshed by cron/overview/rotation — no per-page queries)
+- [x] Value counts: computed live, cached in state (deliberately NOT
+      maintained per-presave — see CLAUDE.md)
+
+### Phase 2 browser testing (CLI harness passed; click-through outstanding)
+
+- [ ] Keys overview table renders correctly with 2+ slots
+- [ ] Add slot → appears in table as "No key configured" until key added
+- [ ] Set active confirm flow; blocked when key missing
+- [ ] Rotate form → batch progress bar → completion messages
+- [ ] Missing-key banner appears on other admin pages within a cron run
 
 ---
+
+## Phase 3 — File encryption (future, design agreed 2026-07-06)
+
+Envelope encryption for uploaded files. Design sketch in CLAUDE.md under
+"PHASE 3 — FILE ENCRYPTION". Key points: random per-file key encrypts the
+file (sodium secretstream, chunked, streaming); file key is wrapped with
+the active SLOT key via acuity_encrypt_encrypt_with_key() and stored in a
+DB table (enc{slot}: prefix) — so slot rotation re-wraps tiny keys instead
+of re-encrypting gigabytes, and file counts fold into the existing slot
+status/entry counts. Opt-in per file field. v1 scope: plain file fields
+(PDF/DXF/photos without derivatives), streamed decrypt via
+hook_file_download. Known hard parts: image-style derivatives, modules
+reading files directly (getid3, pdf_to_image, imagemagick), byte-range
+serving for pdf.js.
+
+- [ ] Build `acuity_encrypt_file` (or submodule) per the sketch
+
+Note: sending a document via a one-off secure link (encrypted attachment on
+acuity_secure_message) is a SEPARATE, much simpler feature — token-derived
+key, no slots/rotation involved — tracked in
+../acuity_secure_link/TODO.md "Phase B follow-on". Build that one first.
 
 ## Future / Nice to have
 

@@ -246,9 +246,10 @@ function acuity_encrypt_keys_overview(): array {
 function acuity_encrypt_admin_form(array $form, array &$_form_state): array {
   global $settings;
 
-  $config         = config('acuity_encrypt.settings');
-  $current_method = $config->get('key_storage_method') ?: 'settings_php';
-  $external_path  = $config->get('external_file_path') ?: '';
+  $registry       = acuity_encrypt_slots();
+  $slot1          = $registry['slots'][1] ?? ['storage' => 'settings_php', 'external_path' => ''];
+  $current_method = $slot1['storage'];
+  $external_path  = $slot1['external_path'];
 
   $key_available    = acuity_encrypt_key_available();
   $settings_php_key = !empty($settings['acuity_encrypt_key1']);
@@ -602,10 +603,6 @@ function acuity_encrypt_admin_form(array $form, array &$_form_state): array {
  * Submit: switch to settings.php method.
  */
 function acuity_encrypt_admin_settings_php_submit(array $_form, array &$_form_state): void {
-  config('acuity_encrypt.settings')
-    ->set('key_storage_method', 'settings_php')
-    ->set('external_file_path', '')
-    ->save();
   _acuity_encrypt_registry_set_slot(1, ['storage' => 'settings_php', 'external_path' => '']);
 
   global $settings;
@@ -655,10 +652,6 @@ function acuity_encrypt_admin_private_file_validate(array $_form, array &$form_s
  * Submit: save key to private filesystem and switch to private_file method.
  */
 function acuity_encrypt_admin_private_file_submit(array $_form, array &$form_state): void {
-  config('acuity_encrypt.settings')
-    ->set('key_storage_method', 'private_file')
-    ->set('external_file_path', '')
-    ->save();
   _acuity_encrypt_registry_set_slot(1, ['storage' => 'private_file', 'external_path' => '']);
 
   _acuity_encrypt_save_private_key($form_state['values']['private_key_value'] ?? '');
@@ -703,10 +696,6 @@ function acuity_encrypt_admin_external_file_validate(array $_form, array &$form_
 function acuity_encrypt_admin_external_file_submit(array $_form, array &$form_state): void {
   $path = trim($form_state['values']['external_file_path'] ?? '');
 
-  config('acuity_encrypt.settings')
-    ->set('key_storage_method', 'external_file')
-    ->set('external_file_path', $path)
-    ->save();
   _acuity_encrypt_registry_set_slot(1, ['storage' => 'external_file', 'external_path' => $path]);
 
   backdrop_set_message(t('Storage method set to external file at <code>@path</code>.', ['@path' => $path]));
@@ -907,15 +896,6 @@ function acuity_encrypt_slot_form_submit(array $form, array &$form_state): void 
   }
   else {
     backdrop_set_message(t('Key slot @id saved.', ['@id' => $slot_id]));
-  }
-
-  // Keep the legacy single-slot settings in sync when editing slot 1 so the
-  // guided "Set keys" tab and older tooling keep reporting the truth.
-  if ($slot_id === 1) {
-    config('acuity_encrypt.settings')
-      ->set('key_storage_method', $values['storage'])
-      ->set('external_file_path', $values['storage'] === 'external_file' ? trim($values['external_path']) : '')
-      ->save();
   }
 
   $form_state['redirect'] = 'admin/config/acuity-utils/acuity_encrypt';

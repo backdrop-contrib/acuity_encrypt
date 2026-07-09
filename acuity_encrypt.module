@@ -420,15 +420,94 @@ function acuity_encrypt_permission(): array {
  */
 function acuity_encrypt_config_info(): array {
   return [
-    'acuity_encrypt.settings' => [
-      'label' => t('Acuity Encrypt settings'),
-      'group' => t('Configuration'),
-    ],
     'acuity_encrypt.slots' => [
       'label' => t('Acuity Encrypt key slot registry'),
       'group' => t('Configuration'),
     ],
   ];
+}
+
+/**
+ * Implements hook_entity_info_alter().
+ *
+ * Disables persistent entity/field caching for any bundle that contains an
+ * encrypted field. hook_field_attach_load() decrypts entity values in place,
+ * and core writes entities to the persistent caches AFTER that hook runs —
+ * without this, decrypted plaintext would be stored in the cache_entity_* /
+ * cache_field database tables (defeating at-rest encryption), and because
+ * those caches are shared across users, the permission-gated decrypt would
+ * cache whatever the first loader was allowed to see.
+ *
+ * Instance configs are read directly rather than via field_info_instances()
+ * because the field info system itself consumes entity info — calling it
+ * from this alter hook would recurse.
+ */
+function acuity_encrypt_entity_info_alter(array &$entity_info): void {
+  foreach (config_get_names_with_prefix('field.instance.') as $config_name) {
+    $instance = config_get($config_name);
+    if (($instance['widget']['type'] ?? '') !== 'acuity_encrypt_widget' || !empty($instance['deleted'])) {
+      continue;
+    }
+    $entity_type = $instance['entity_type'];
+    if (!isset($entity_info[$entity_type])) {
+      continue;
+    }
+    // 'field cache' is per entity type; 'bundle cache' (persistent entity
+    // cache writes) is per bundle.
+    $entity_info[$entity_type]['field cache'] = FALSE;
+    if (isset($entity_info[$entity_type]['bundles'][$instance['bundle']])) {
+      $entity_info[$entity_type]['bundles'][$instance['bundle']]['bundle cache'] = FALSE;
+    }
+  }
+}
+
+/**
+ * Implements hook_field_create_instance().
+ */
+function acuity_encrypt_field_create_instance(array $instance): void {
+  if (($instance['widget']['type'] ?? '') === 'acuity_encrypt_widget') {
+    _acuity_encrypt_caching_flags_changed($instance['entity_type']);
+  }
+}
+
+/**
+ * Implements hook_field_update_instance().
+ */
+function acuity_encrypt_field_update_instance(array $instance, array $prior_instance): void {
+  $was = ($prior_instance['widget']['type'] ?? '') === 'acuity_encrypt_widget';
+  $now = ($instance['widget']['type'] ?? '') === 'acuity_encrypt_widget';
+  if ($was !== $now) {
+    _acuity_encrypt_caching_flags_changed($instance['entity_type']);
+  }
+}
+
+/**
+ * Implements hook_field_delete_instance().
+ */
+function acuity_encrypt_field_delete_instance(array $instance): void {
+  if (($instance['widget']['type'] ?? '') === 'acuity_encrypt_widget') {
+    _acuity_encrypt_caching_flags_changed($instance['entity_type']);
+  }
+}
+
+/**
+ * Rebuilds entity info and purges caches after encryption is toggled on a
+ * bundle (instance created/deleted, or its widget switched to/from the
+ * encrypt widget).
+ *
+ * Entity info must be rebuilt so acuity_encrypt_entity_info_alter() can
+ * (re)apply the no-persistent-cache flags, and existing cache entries are
+ * purged because they may hold plaintext written before the flags applied.
+ */
+function _acuity_encrypt_caching_flags_changed(string $entity_type): void {
+  entity_info_cache_clear();
+  $table = 'cache_entity_' . $entity_type;
+  if (db_table_exists($table)) {
+    db_truncate($table)->execute();
+  }
+  if (db_table_exists('cache_field')) {
+    db_truncate('cache_field')->execute();
+  }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -502,14 +581,15 @@ function _acuity_encrypt_get_key(int $slot = 1): string|null {
 /**
  * Returns the slot registry: active slot id + per-slot storage config.
  *
- * Backed by acuity_encrypt.slots.json. When the registry is empty (site not
- * yet migrated), slot 1 is synthesized from the legacy acuity_encrypt.settings
- * keys so existing single-slot sites keep working unchanged.
+ * Backed by acuity_encrypt.slots.json. When the registry is empty (config
+ * file missing or blank), a default slot 1 is returned so key lookups never
+ * fatal.
  *
  * @return array
  *   ['active_slot' => int, 'slots' => [id => [label, storage, external_path]]]
  */
 function acuity_encrypt_slots(): array {
+  /** @var array|null $registry */
   $registry = &backdrop_static(__FUNCTION__);
   if ($registry !== NULL) {
     return $registry;
@@ -520,15 +600,10 @@ function acuity_encrypt_slots(): array {
   $active = (int) ($config->get('active_slot') ?: 1);
 
   if (empty($slots)) {
-    $legacy = config('acuity_encrypt.settings');
     $registry = [
       'active_slot' => 1,
       'slots' => [
-        1 => [
-          'label' => 'Default',
-          'storage' => $legacy->get('key_storage_method') ?: 'settings_php',
-          'external_path' => $legacy->get('external_file_path') ?: '',
-        ],
+        1 => ['label' => 'Default', 'storage' => 'settings_php', 'external_path' => ''],
       ],
     ];
     return $registry;

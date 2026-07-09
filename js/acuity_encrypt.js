@@ -41,6 +41,13 @@
           $btn.text(Backdrop.t('Hide'));
         }
         else {
+          // Key backup panel: scrub the fetched key from the DOM on hide —
+          // the next Reveal re-fetches it. (Field formatters have no keyUrl;
+          // their hidden value is embedded server-side for authorised users
+          // by design.)
+          if (keyUrl) {
+            $value.text('').removeData('loaded');
+          }
           $value.hide();
           $masked.removeAttr('aria-hidden').show();
           $btn.text(Backdrop.t('Reveal'));

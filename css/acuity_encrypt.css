@@ -6,6 +6,14 @@
   color: #777;
 }
 
+/* Sentence variant of the mask (formatters) — bullet styling off. */
+.acuity-encrypt-masked-text {
+  font-family: inherit;
+  letter-spacing: normal;
+  font-style: italic;
+  font-size: 0.9em;
+}
+
 .acuity-encrypt-value {
   font-family: monospace;
   word-break: break-all;

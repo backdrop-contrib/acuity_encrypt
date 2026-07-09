@@ -9,15 +9,22 @@
  * this widget in Field UI is the encryption signal — no separate checkbox or
  * instance setting is needed.
  *
- * Encryption is transparent: hook_field_attach_load() decrypts on every
- * entity load, so Views, tokens, search indexes, and all other consumers
- * receive plaintext automatically. The protection is at-rest (database
- * dumps) — it is not an access control mechanism. Use Backdrop's normal role
- * permissions and Views access rules to control who sees the content.
+ * Decryption is permission-gated: hook_field_attach_load() decrypts on
+ * entity load ONLY when the current user has 'view encrypted fields'. For
+ * those users, Views, tokens, and other consumers receive plaintext
+ * automatically. For everyone else (including cron/search indexing, which
+ * runs unprivileged) the ciphertext stays in place — core formatters render
+ * ciphertext, this module's widget and formatters render a mask. Fail
+ * closed.
+ *
+ * This gate is only safe because acuity_encrypt_entity_info_alter()
+ * disables persistent entity/field caching for encrypted bundles: nothing
+ * user-dependent (and no plaintext) is ever written to a cache table.
  *
  * Edit form: hook_field_widget_form() masks the value behind a
  * "Reveal to edit" button. Users without 'view encrypted fields' see a
- * locked placeholder and cannot modify the field.
+ * locked placeholder and cannot modify the field; the stored ciphertext is
+ * passed through the form submission untouched.
  */
 
 // ── Widget registration ───────────────────────────────────────────────────────
@@ -62,8 +69,10 @@ function acuity_encrypt_field_widget_info(): array {
  *   underneath; clicking "Reveal to edit" removes the overlay.
  *
  * Unauthorised users (no 'view encrypted fields') with existing data:
- *   '#type' => 'value' elements preserve plaintext through the form submission
- *   without rendering it in the DOM. Presave re-encrypts on save.
+ *   attach_load did not decrypt for them, so $items still holds ciphertext.
+ *   '#type' => 'value' elements pass it through the form submission without
+ *   rendering anything in the DOM; presave skips already-encrypted values,
+ *   so the stored value survives the save byte-for-byte.
  *
  * Empty fields (any user):
  *   Widget renders unmasked — nothing to mask yet.
@@ -81,11 +90,18 @@ function acuity_encrypt_field_widget_form(array &$_form, array &$_form_state, ar
   // ── Long text / WYSIWYG ────────────────────────────────────────────────────
 
   if ($is_long) {
-    // Unauthorised user with existing data: preserve value+format as hidden
-    // value elements so they pass through the form submission unchanged.
+    // Unauthorised user with existing data: preserve value+format (and
+    // summary) as hidden value elements so they pass through the form
+    // submission unchanged.
     if ($has_data && !$can_view) {
       $element['value'] = ['#type' => 'value', '#value' => $stored];
       $element['format'] = ['#type' => 'value', '#value' => $format];
+      if ($field['type'] === 'text_with_summary') {
+        $element['summary'] = [
+          '#type' => 'value',
+          '#value' => isset($items[$delta]['summary']) ? $items[$delta]['summary'] : NULL,
+        ];
+      }
       $element['acuity_locked'] = [
         '#markup' => '<div class="form-item acuity-encrypt-locked">'
           . '<label>' . check_plain($element['#title']) . '</label>'
@@ -107,6 +123,34 @@ function acuity_encrypt_field_widget_form(array &$_form, array &$_form_state, ar
     $element['#format']        = $format;
     $element['#base_type']     = 'textarea';
     $element['#rows']          = $rows;
+    // Core's text.js locates the main field by this class to place the
+    // "Edit summary" link next to its label; core's own text widgets always
+    // set it. Without it the summary link is appended to a detached label
+    // and never appears.
+    $element['#attributes']['class'][] = 'text-full';
+
+    // Summary sub-element — same construction as core's
+    // text_textarea_with_summary widget, including text.js, which provides
+    // the "Edit summary" toggle link. Without this child element the form
+    // would silently drop the stored summary on save. When the field has
+    // data, the summary sits inside the overlay wrapper below, so it is
+    // masked and revealed together with the main value.
+    if ($field['type'] === 'text_with_summary') {
+      $summary = isset($items[$delta]['summary']) ? $items[$delta]['summary'] : NULL;
+      $display_summary = !empty($summary) || !empty($instance['settings']['display_summary']);
+      $element['summary'] = [
+        '#type'          => $display_summary ? 'textarea' : 'value',
+        '#default_value' => $summary,
+        '#title'         => t('Summary'),
+        '#rows'          => !empty($instance['widget']['settings']['summary_rows']) ? (int) $instance['widget']['settings']['summary_rows'] : 5,
+        '#description'   => t('Leave blank to use trimmed value of full text as the summary.'),
+        '#attached'      => ['js' => [backdrop_get_path('module', 'text') . '/js/text.js']],
+        '#attributes'    => ['class' => ['text-summary']],
+        '#prefix'        => '<div class="text-summary-wrapper">',
+        '#suffix'        => '</div>',
+        '#weight'        => -10,
+      ];
+    }
 
     // Empty field — show the editor unmasked.
     if (!$has_data) {
@@ -231,16 +275,83 @@ function acuity_encrypt_widget_length_validate(array $element, array &$form_stat
  */
 function acuity_encrypt_field_formatter_info(): array {
   $types = ['text', 'text_long', 'text_with_summary'];
+  $settings = ['hide_denied' => 0];
   return [
     'acuity_encrypt_reveal' => [
       'label'       => t('Acuity Encrypt: masked with reveal button'),
       'field types' => $types,
+      'settings'    => $settings,
     ],
     'acuity_encrypt_plain' => [
       'label'       => t('Acuity Encrypt: plain decrypted text'),
       'field types' => $types,
+      'settings'    => $settings,
+    ],
+    // Fail-closed replacement for core's "Summary or trimmed" — the core
+    // formatter renders whatever is in the item, which for unauthorised
+    // viewers is raw ciphertext.
+    'acuity_encrypt_summary' => [
+      'label'       => t('Acuity Encrypt: summary or trimmed'),
+      'field types' => ['text_with_summary'],
+      'settings'    => $settings + ['trim_length' => 600],
     ],
   ];
+}
+
+/**
+ * Returns the static masked element rendered for undecrypted values.
+ */
+function _acuity_encrypt_masked_element(string $module_path): array {
+  return [
+    '#markup' => '<span class="acuity-encrypt-masked acuity-encrypt-masked-text">'
+      . t('Encrypted text - If you have permission to view, click Reveal')
+      . '</span>',
+    '#attached' => ['css' => [$module_path . '/css/acuity_encrypt.css']],
+  ];
+}
+
+/**
+ * Implements hook_field_formatter_settings_form().
+ */
+function acuity_encrypt_field_formatter_settings_form(array $field, array $instance, string $view_mode, array $form, array &$form_state): array {
+  $display  = $instance['display'][$view_mode] ?? [];
+  $settings = $display['settings'] ?? [];
+  $element = [];
+  if (($display['type'] ?? '') === 'acuity_encrypt_summary') {
+    // Mirrors core's trim_length setting on "Summary or trimmed".
+    $element['trim_length'] = [
+      '#type'             => 'textfield',
+      '#title'            => t('Trim length'),
+      '#description'      => t('Used when the summary is empty: the full text is trimmed to this many characters.'),
+      '#default_value'    => $settings['trim_length'] ?? 600,
+      '#size'             => 10,
+      '#element_validate' => ['element_validate_integer_positive'],
+      '#required'         => TRUE,
+    ];
+  }
+  $element['hide_denied'] = [
+    '#type'          => 'checkbox',
+    '#title'         => t('Hide completely for viewers without the <em>view encrypted fields</em> permission'),
+    '#description'   => t('Output nothing at all instead of the "Encrypted text…" mask — the field, including its label, disappears for unauthorised viewers. In Views, combine with "No results behavior: Hide if empty" so the row leaves no gap.'),
+    '#default_value' => !empty($settings['hide_denied']),
+  ];
+  return $element;
+}
+
+/**
+ * Implements hook_field_formatter_settings_summary().
+ */
+function acuity_encrypt_field_formatter_settings_summary(array $field, array $instance, string $view_mode): string {
+  $display  = $instance['display'][$view_mode] ?? [];
+  $settings = $display['settings'] ?? [];
+  $parts = [];
+  if (($display['type'] ?? '') === 'acuity_encrypt_summary') {
+    $parts[] = t('Trim length: @length', ['@length' => $settings['trim_length'] ?? 600]);
+  }
+  $parts[] = !empty($settings['hide_denied'])
+    ? t('Without permission: hidden entirely')
+    : t('Without permission: masked');
+  return implode('; ', $parts);
 }
 
 /**
@@ -253,16 +364,43 @@ function acuity_encrypt_field_formatter_info(): array {
  *
  * acuity_encrypt_plain: renders the decrypted value directly using the field's
  *   stored text format. Use this where the masked reveal UX is not needed.
+ *   Unauthorised users see the static mask.
  *
- * By the time this runs, hook_field_attach_load() has already decrypted the
- * values and refreshed safe_value, so $items contains plaintext.
+ * acuity_encrypt_summary: fail-closed replacement for core's "Summary or
+ *   trimmed" (text_with_summary only) — decrypted summary if present, else
+ *   the decrypted value trimmed to the trim_length setting. Core's own
+ *   formatter would render raw ciphertext for unauthorised viewers.
+ *
+ * For authorised users, hook_field_attach_load() has already decrypted the
+ * values and refreshed safe_value, so $items contains plaintext. For
+ * unauthorised users (or when the key is missing) $items still holds
+ * ciphertext — both formatters detect that and render the static mask
+ * rather than leaking raw ciphertext into the page.
  */
 function acuity_encrypt_field_formatter_view(string $_entity_type, object $_entity, array $_field, array $_instance, string $_langcode, array &$items, array $display): array {
   $elements    = [];
   $module_path = backdrop_get_path('module', 'acuity_encrypt');
 
+  $can_view = user_access('view encrypted fields');
+
+  // Optional per-display setting: render nothing at all for unauthorised
+  // viewers. Returning an empty array makes field_default_view() skip the
+  // whole field — wrapper and label included — on node displays and in
+  // Views (pair with Views' "No results behavior: Hide if empty").
+  if (!$can_view && !empty($display['settings']['hide_denied'])) {
+    return [];
+  }
+
   foreach ($items as $delta => $item) {
     $value = isset($item['value']) ? $item['value'] : '';
+
+    // Fail closed: no permission, or the value is still ciphertext (key
+    // missing / decrypt failed) — render the static mask, keep the value
+    // out of the DOM entirely.
+    if (!$can_view || acuity_encrypt_is_encrypted($value)) {
+      $elements[$delta] = _acuity_encrypt_masked_element($module_path);
+      continue;
+    }
 
     if ($display['type'] === 'acuity_encrypt_plain') {
       $elements[$delta] = [
@@ -271,20 +409,37 @@ function acuity_encrypt_field_formatter_view(string $_entity_type, object $_enti
       continue;
     }
 
-    // acuity_encrypt_reveal
-    if (!user_access('view encrypted fields')) {
-      $elements[$delta] = [
-        '#markup' => '<span class="acuity-encrypt-masked">••••••••</span>',
-        '#attached' => ['css' => [$module_path . '/css/acuity_encrypt.css']],
-      ];
+    // acuity_encrypt_summary — like core's "Summary or trimmed", but the
+    // undecrypted cases were already masked above.
+    if ($display['type'] === 'acuity_encrypt_summary') {
+      $summary = isset($item['summary']) ? $item['summary'] : '';
+      if ($summary !== '' && acuity_encrypt_is_encrypted($summary)) {
+        // Value decrypted but the summary did not — treat as undecrypted.
+        $elements[$delta] = _acuity_encrypt_masked_element($module_path);
+      }
+      elseif ($summary !== '') {
+        $elements[$delta] = [
+          '#markup' => !empty($item['safe_summary']) ? $item['safe_summary'] : check_plain($summary),
+        ];
+      }
+      else {
+        $output = !empty($item['safe_value']) ? $item['safe_value'] : check_plain($value);
+        $trim_length = !empty($display['settings']['trim_length']) ? (int) $display['settings']['trim_length'] : 600;
+        $elements[$delta] = [
+          '#markup' => text_summary($output, !empty($item['format']) ? $item['format'] : NULL, $trim_length),
+        ];
+      }
       continue;
     }
 
+    // acuity_encrypt_reveal
     $rendered = !empty($item['safe_value']) ? $item['safe_value'] : check_plain($value);
 
     $elements[$delta] = [
       '#markup' => '<div class="acuity-encrypt-wrap">'
-        . '<span class="acuity-encrypt-masked">••••••••</span>'
+        . '<span class="acuity-encrypt-masked acuity-encrypt-masked-text">'
+        . t('Encrypted text - If you have permission to view, click Reveal')
+        . '</span>'
         . '&nbsp;<button type="button" class="acuity-encrypt-reveal-btn">'
         . t('Reveal') . '</button>'
         . '<span class="acuity-encrypt-value" style="display:none">'
@@ -324,6 +479,16 @@ function acuity_encrypt_field_attach_load(string $entity_type, array $entities, 
     return;
   }
 
+  // Permission gate: decrypt only for users allowed to see plaintext.
+  // Everyone else keeps ciphertext in the entity — core formatters render
+  // ciphertext, this module's widget/formatters render a mask (fail closed).
+  // Safe only because acuity_encrypt_entity_info_alter() disables persistent
+  // entity/field caching for encrypted bundles; otherwise this user-dependent
+  // result would be cached and served to other users.
+  if (!user_access('view encrypted fields')) {
+    return;
+  }
+
   $cache = &backdrop_static(__FUNCTION__, []);
 
   foreach ($entities as $entity) {
@@ -334,6 +499,7 @@ function acuity_encrypt_field_attach_load(string $entity_type, array $entities, 
       $cache[$cache_key] = [];
       foreach (field_info_instances($entity_type, $bundle) as $field_name => $instance) {
         if ($instance['widget']['type'] === 'acuity_encrypt_widget') {
+          /** @var array $field */
           $field = field_info_field($field_name);
           $cache[$cache_key][$field_name] = $field['type'];
         }
@@ -352,8 +518,13 @@ function acuity_encrypt_field_attach_load(string $entity_type, array $entities, 
               $item['value'] = $plain;
               // Recompute safe_value so the text formatter and other consumers
               // get plaintext, not the ciphertext that hook_field_load() saw.
+              // Plain fields (no text processing, empty format) get
+              // check_plain — mirroring text module's _text_sanitize().
               if (!empty($item['format'])) {
                 $item['safe_value'] = check_markup($item['value'], $item['format'], $langcode, FALSE);
+              }
+              elseif (isset($item['safe_value'])) {
+                $item['safe_value'] = check_plain($item['value']);
               }
             }
           }
@@ -365,6 +536,9 @@ function acuity_encrypt_field_attach_load(string $entity_type, array $entities, 
               $item['summary'] = $plain;
               if (!empty($item['format'])) {
                 $item['safe_summary'] = check_markup($item['summary'], $item['format'], $langcode, FALSE);
+              }
+              elseif (isset($item['safe_summary'])) {
+                $item['safe_summary'] = check_plain($item['summary']);
               }
             }
           }
@@ -401,6 +575,7 @@ function acuity_encrypt_field_attach_presave(string $entity_type, object $entity
     if ($instance['widget']['type'] !== 'acuity_encrypt_widget') {
       continue;
     }
+    /** @var array $field */
     $field = field_info_field($field_name);
     if (!isset($entity->{$field_name})) {
       continue;

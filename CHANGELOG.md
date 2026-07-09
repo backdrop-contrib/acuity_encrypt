@@ -11,6 +11,76 @@ Phase 2: key slot management and hard rotation. Built and verified with a
 32-assertion CLI test harness against a live site (rotation forward and
 back on real nodes including revisions).
 
+### Security (2026-07-09)
+
+- **Decryption is now permission-gated.** `hook_field_attach_load()` only
+  decrypts for users with `view encrypted fields`. Previously it decrypted
+  unconditionally, so core formatters, Views raw output, and tokens served
+  plaintext to unpermitted users; those paths now see ciphertext (fail
+  closed) and this module's formatters render a static mask for any value
+  that is still ciphertext. Consequence: encrypted fields are no longer
+  searchable (cron indexing runs unprivileged) — rebuild the search index
+  to flush any previously indexed plaintext.
+- **Plaintext no longer written to persistent caches.** Core writes entities
+  to `cache_entity_*` / `cache_field` AFTER the decrypt hook runs, so
+  decrypted plaintext was being persisted into the same database — and,
+  once decrypt became user-dependent, whatever the first loader saw would
+  have been cached for everyone. `hook_entity_info_alter()` now disables
+  persistent entity/field caching for any bundle containing an encrypted
+  field (instance CRUD hooks keep the flags current), and
+  `acuity_encrypt_update_1002()` purges cache entries written by older
+  versions. This also fixes stale decrypted values being served from the
+  entity cache after a field's widget was switched away from Acuity
+  Encrypt.
+- Unauthorised users' edit forms now round-trip the ciphertext instead of
+  hiding decrypted plaintext in `#type => 'value'` elements (plaintext no
+  longer enters the form cache).
+
+### Changed (2026-07-09)
+
+- Display formatters now show the explanatory mask "Encrypted text - If you
+  have permission to view, click Reveal" (translatable) instead of the
+  `••••••••` bullets. Edit-widget masks and the admin key backup panel keep
+  the bullet style.
+- New formatter "Acuity Encrypt: summary or trimmed" (text_with_summary
+  only) — fail-closed replacement for core's "Summary or trimmed", which
+  renders raw ciphertext for viewers without permission. Decrypted summary
+  when present, else the value trimmed to the trim_length setting
+  (default 600, same as core); undecrypted values get the mask.
+- New per-display formatter setting "Hide completely for viewers without
+  the view encrypted fields permission" (all formatters, default off):
+  outputs nothing instead of the mask, so the field — label included —
+  disappears for unauthorised viewers on node displays and in Views
+  (combine with Views' "No results behavior: Hide if empty").
+
+### Fixed (2026-07-09)
+
+- Admin key backup panel: clicking Hide after Reveal only set the fetched
+  key to `display:none`, leaving the raw key in the page DOM. Hide now
+  scrubs the key text from the DOM entirely; clicking Reveal again
+  re-fetches it via the token-protected AJAX endpoint. (Field formatter
+  reveal is unaffected — its hidden value is embedded server-side for
+  authorised users by design.)
+
+- `text_with_summary` widget had no summary sub-element: the "Edit summary"
+  link never appeared, the summary could not be edited, and — because the
+  form never submitted a `summary` key — the stored summary was silently
+  dropped on save. The widget now mirrors core's
+  `text_textarea_with_summary` construction (including core's text.js
+  toggle link); the summary renders inside the reveal overlay so it is
+  masked/revealed with the main value, and unauthorised users' forms
+  round-trip it untouched via a hidden value element. The main element also
+  gains core's `text-full` class — text.js anchors the "Edit summary" link
+  to it, so without the class the link (and a hidden empty summary) never
+  appeared.
+- Plain short-text fields (text processing off, empty format) displayed
+  ciphertext through both of this module's formatters: `safe_value` was
+  only recomputed after decrypt when the item had a text format, but core's
+  text module had already set `safe_value` to sanitized CIPHERTEXT — and
+  the formatters prefer `safe_value`. Formatless items now get
+  `check_plain(plaintext)`, mirroring text module's `_text_sanitize()`
+  (same fix for `safe_summary`).
+
 ### Key slots
 
 - New `config/acuity_encrypt.slots.json` registry: active slot id plus
@@ -19,8 +89,10 @@ back on real nodes including revisions).
 - `acuity_encrypt_encrypt()` slot parameter is now NULL-default and resolves
   to the **active slot**; `_acuity_encrypt_get_key()` resolves any slot
   (settings.php `acuity_encrypt_key{N}` always wins, then registered storage).
-- `acuity_encrypt_update_1000()` migrates existing single-slot sites; the
-  legacy "Set keys" accordion stays in sync with registry slot 1.
+- The slot registry is the sole source of truth: the legacy single-slot
+  `acuity_encrypt.settings` config is removed entirely (the "Set keys"
+  accordion now reads/writes registry slot 1 directly), and
+  `acuity_encrypt_update_1001()` deletes the stale config file.
 - View keys tab rewritten: every slot with storage, key identifier, live
   encrypted-entry count (data + revision tables), derived status (Active /
   In use / Available / KEY MISSING / No key configured), and operations.

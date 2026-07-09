@@ -12,11 +12,6 @@
  * Implements hook_install().
  */
 function acuity_encrypt_install(): void {
-  config('acuity_encrypt.settings')
-    ->set('key_storage_method', 'settings_php')
-    ->set('external_file_path', '')
-    ->save();
-
   config('acuity_encrypt.slots')
     ->set('active_slot', 1)
     ->set('slots', [
@@ -30,33 +25,42 @@ function acuity_encrypt_install(): void {
  */
 function acuity_encrypt_uninstall(): void {
   $config_directory = config_get_config_directory('active');
-  foreach (['acuity_encrypt.settings.json', 'acuity_encrypt.slots.json'] as $filename) {
-    $file = $config_directory . '/' . $filename;
-    if (file_exists($file)) {
-      unlink($file);
-    }
+  $file = $config_directory . '/acuity_encrypt.slots.json';
+  if (file_exists($file)) {
+    unlink($file);
   }
   state_del('acuity_encrypt_missing_key_slots');
   state_del('acuity_encrypt_orphan_values');
 }
 
 /**
- * Create the key slot registry from the legacy single-slot settings.
+ * Delete the legacy single-slot acuity_encrypt.settings config.
+ *
+ * The slot registry (acuity_encrypt.slots) is the sole source of truth;
+ * the pre-multi-slot config file and its update_1000() migration are gone.
  */
-function acuity_encrypt_update_1000(): void {
-  $slots = config_get('acuity_encrypt.slots', 'slots');
-  if (!empty($slots)) {
-    return;
+function acuity_encrypt_update_1001(): void {
+  config('acuity_encrypt.settings')->delete();
+}
+
+/**
+ * Purge persistent caches that may hold decrypted plaintext.
+ *
+ * Before this release, hook_field_attach_load() decrypted entities BEFORE
+ * core wrote them to the persistent entity/field caches, so cache_entity_*
+ * and cache_field tables can contain plaintext copies of encrypted fields.
+ * Caching is now disabled for encrypted bundles (hook_entity_info_alter);
+ * this wipes what earlier code already persisted.
+ */
+function acuity_encrypt_update_1002(): void {
+  foreach (array_keys(entity_get_info()) as $entity_type) {
+    $table = 'cache_entity_' . $entity_type;
+    if (db_table_exists($table)) {
+      db_truncate($table)->execute();
+    }
   }
-  $legacy = config('acuity_encrypt.settings');
-  config('acuity_encrypt.slots')
-    ->set('active_slot', 1)
-    ->set('slots', [
-      1 => [
-        'label' => 'Default',
-        'storage' => $legacy->get('key_storage_method') ?: 'settings_php',
-        'external_path' => $legacy->get('external_file_path') ?: '',
-      ],
-    ])
-    ->save();
+  if (db_table_exists('cache_field')) {
+    db_truncate('cache_field')->execute();
+  }
+  entity_info_cache_clear();
 }

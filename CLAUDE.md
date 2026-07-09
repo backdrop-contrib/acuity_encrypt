@@ -40,8 +40,7 @@ acuity_encrypt.admin.inc   Admin: keys overview, slot add/edit/activate,
                            Set keys accordion, generate key, reveal endpoint
 acuity_encrypt.rotate.inc  Hard rotation: form + Batch API ops (Phase 2)
 acuity_encrypt.actions.inc VBO action: bulk encrypt existing field values
-acuity_encrypt.install     hook_install / update_1000 / hook_uninstall
-config/acuity_encrypt.settings.json  Legacy slot-1 config (kept in sync)
+acuity_encrypt.install     hook_install / update hooks / hook_uninstall
 config/acuity_encrypt.slots.json     Slot registry: active_slot + per-slot storage
 js/acuity_encrypt.js       Reveal toggles: display formatter + edit widget
 js/acuity_encrypt.admin.js Generate key button (slot-aware), copy-to-clipboard
@@ -77,8 +76,10 @@ the top of `.module` so all hook implementations are always discoverable.
    (`private://keys/acuity_encrypt_key{N}.key`).
 
 Keys are **never stored in CMI config or the database** — the registry holds
-only labels, storage method, and paths. If the registry is empty (unmigrated
-site), `acuity_encrypt_slots()` synthesizes slot 1 from the legacy settings.
+only labels, storage method, and paths. If the registry is empty (config file
+missing or blank), `acuity_encrypt_slots()` falls back to a default slot 1
+(settings.php storage). The registry is the sole config: the pre-multi-slot
+`acuity_encrypt.settings` file was removed (update_1001 deletes it).
 
 ### Key naming convention
 
@@ -127,12 +128,19 @@ No separate checkbox needed. The widget selection IS the signal to
 - Overlay shows `••••••••` + "Reveal to edit" button on top of the editor.
 - JS (`data-mode="overlay"`): clicking reveal hides only the overlay div;
   CKEditor is already initialised and ready.
+- `text_with_summary`: a summary sub-element is added exactly like core's
+  text_textarea_with_summary widget (core text.js supplies the "Edit
+  summary" link). It renders inside the overlay wrapper, so it is
+  masked/revealed together with the value. Without this child element the
+  form would silently drop the stored summary on save (fixed 2026-07-09).
 
 **Unauthorised users (no `view encrypted fields`) with existing data:**
-- `#type => 'value'` elements carry `value` (and `format` for long text)
-  through the form submission without appearing in the HTML DOM.
+- attach_load did not decrypt for them (permission gate), so `#type => 'value'`
+  elements carry the CIPHERTEXT (and `format` for long text) through the form
+  submission — nothing in the DOM, and no plaintext in the form cache.
 - Visible locked `••••••••` placeholder shown instead.
-- Presave re-encrypts automatically.
+- Presave skips already-encrypted values, so the stored value survives the
+  save byte-for-byte.
 
 **Empty fields (any user):**
 - Widget rendered normally (nothing to mask yet).
@@ -163,6 +171,47 @@ Display independently of the widget.
 - Renders the decrypted value directly using `$item['safe_value']` (which
   has been refreshed by the load hook to contain plaintext).
 
+### acuity_encrypt_summary (text_with_summary only)
+
+- Fail-closed replacement for core's "Summary or trimmed": core's formatter
+  renders whatever is in the item — raw ciphertext for unauthorised viewers.
+  Ours renders the decrypted summary when present, else `text_summary()` of
+  the decrypted value trimmed to the `trim_length` setting (default 600,
+  matching core). A summary that is still ciphertext gets the mask even if
+  the value decrypted.
+
+Both formatters fail closed: if the user lacks the permission OR the value is
+still ciphertext (key missing, decrypt failed, unauthorised load), they render
+the static mask text ("Encrypted text - If you have permission to view, click
+Reveal") — raw ciphertext never reaches the page through this module's
+formatters.
+
+Per-display formatter setting `hide_denied` (all formatters, default off):
+for viewers WITHOUT the permission the formatter returns an empty element
+array, so field_default_view() emits nothing — no wrapper, no label. Works on
+node displays and in Views (advise Views' "No results behavior: Hide if
+empty" so the row collapses). Deliberately does NOT apply to
+permitted-but-undecryptable values — those keep the mask as a visible
+diagnostic.
+
+### Views
+
+No custom Views handlers needed — Views renders content fields through the
+field formatters (views_handler_field_field → field_view_field), so the
+three formatters above plus `hide_denied` cover display. Rules of thumb
+(documented for site builders in README "Encrypted Fields in Views"):
+
+- Module formatters only for encrypted fields in Views; core formatters
+  render raw ciphertext to unpermitted viewers (safe, but looks broken).
+  This is why acuity_encrypt_summary exists — core's "Summary or trimmed"
+  was the common offender.
+- Full hide per viewer = `hide_denied` setting + Views "No results
+  behavior: Hide if empty".
+- SQL-level operations (Views filters/sorts/aggregation, exposed search)
+  run against ciphertext columns and can never match plaintext — a hard
+  limitation of at-rest field encryption, not a bug. Same reason encrypted
+  fields are absent from the search index.
+
 ---
 
 ## Hook flow
@@ -187,8 +236,71 @@ Fix: after decrypting `value`, we recompute `safe_value` in `hook_field_attach_l
 ```php
 $item['safe_value'] = check_markup($item['value'], $item['format'], $langcode, FALSE);
 ```
+Gotcha (fixed 2026-07-09): plain fields with text processing OFF have an
+EMPTY format, but text module still sets `safe_value = check_plain(ciphertext)`
+via `_text_sanitize()`. Formatless items must therefore be refreshed with
+`check_plain($item['value'])` — originally the recompute only ran when a
+format was set, so short plain-text fields rendered ciphertext through any
+formatter that prefers `safe_value` (including this module's own).
+Same applies to `safe_summary`.
+
 This means the standard text formatter, Views, tokens, and anything else that
 reads `safe_value` all get the correct plaintext.
+
+### Permission-gated decrypt + cache hardening (2026-07-09)
+
+`hook_field_attach_load()` decrypts ONLY when the current user has
+`view encrypted fields`. Unprivileged requests (including cron search
+indexing) keep ciphertext in the entity: core formatters render harmless
+ciphertext, this module's widget/formatters render the mask. Consequences:
+encrypted fields are not searchable; tokens/Views yield plaintext only for
+permitted users; the CLI test harness must run with a privileged user (or
+test the encrypt/decrypt API functions directly, which are not gated).
+
+The gate is only safe because `acuity_encrypt_entity_info_alter()` disables
+persistent caching for encrypted bundles (`bundle cache` per bundle, `field
+cache` per entity type). Core writes entities to `cache_entity_*` /
+`cache_field` AFTER attach_load runs (entity.controller.inc /
+field.attach.inc) — with caching on, plaintext would be persisted into the
+same database at-rest encryption protects, and the user-dependent decrypt
+would be cached across users. The alter hook reads `field.instance.*`
+configs directly (field_info_instances() would recurse into entity info).
+Instance CRUD hooks rebuild entity info and truncate the affected cache
+tables when encryption is toggled on a bundle; `update_1002` purged caches
+already poisoned by older code.
+
+### KNOWN GAP — edit-form plaintext in the form cache (tempstore)
+
+The cache hardening above covers the DISPLAY/render path only. The EDIT path
+still leaks plaintext at rest, and it is NOT yet fixed (tracked in TODO,
+post-beta). Findings (investigated 2026-07-09):
+
+- For an authorised user, attach_load decrypts, so the widget's
+  `#default_value` is plaintext AND `$form_state['node']` holds the
+  decrypted node.
+- Backdrop caches a form to the DB `tempstore` table (collections `form`
+  and `form_state`, keyed by `form_build_id`, ~6h TTL) ONLY when
+  `$form_state['cache']` is TRUE — which `ajax_process_form()` sets for the
+  WHOLE form as soon as any element has `#ajax`. A file/image field
+  (managed_file uploads via AJAX) is the common trigger.
+- What gets cached leaks plaintext in TWO places: the form structure
+  snapshot `$unprocessed_form` (form.inc:909, taken pre-form_builder →
+  contains `#default_value`), and the cached `$form_state` (form.inc:595 —
+  `form_state_keys_no_cache()` excludes `values`/`input` but NOT `node`, so
+  the decrypted node object is cached too).
+- "Just disable caching" is a dead end: `ajax_get_form()` (ajax.inc:333)
+  rehydrates AJAX callbacks purely from `form_get_cache()` with NO
+  rebuild-from-scratch fallback — empty cache → "Invalid form POST data" →
+  `backdrop_exit()`. So forcing `no_cache` breaks the very AJAX element
+  whose presence caused the caching (file uploads, add-another, etc.).
+- Clear-on-save (`tempstore_clear('form'/'form_state', $build_id)` in a
+  submit handler) is only a PARTIAL mitigation: it shrinks the window for
+  SAVED edits but does nothing for abandoned/never-saved edit sessions,
+  which sit until TTL. Real fix must keep plaintext OUT of the tempstore:
+  defer `#default_value` to a `#process` callback (post-snapshot) AND
+  scrub/re-encrypt the encrypted fields on `$form_state['node']` before
+  caching. Site-level interim mitigation: shorten `form_cache_expiration`
+  in settings.php.
 
 ---
 
@@ -271,11 +383,15 @@ at the bottom; browser click-through of the new admin pages outstanding.**
   fetched via a token-protected AJAX endpoint on "Reveal key" click.
 - External file path validation hard-rejects paths inside the webroot.
 
-Deliberately not changed: the `view encrypted fields` permission is
-by design a UI-masking permission (gates this module's own widget/formatter),
-not an access-control mechanism — `hook_field_attach_load()` decrypts
-unconditionally so other consumers (Views, REST, tokens) work transparently.
-See the file-level docblock in `acuity_encrypt.field.inc`.
+REVERSED 2026-07-09: the original design treated `view encrypted fields` as a
+UI-masking permission only, with `hook_field_attach_load()` decrypting
+unconditionally so Views/REST/tokens worked transparently for everyone. That
+let any render path outside this module's formatters serve plaintext to
+unpermitted users, and core's post-attach_load cache writes persisted
+plaintext into `cache_entity_*`. Decrypt is now permission-gated with
+persistent caching disabled on encrypted bundles — see "Permission-gated
+decrypt + cache hardening" above and the file-level docblock in
+`acuity_encrypt.field.inc`.
 
 Still needs:
 - Full round-trip test: create node → view (masked display) → edit (masked widget) → reveal → save → re-view.
@@ -347,8 +463,8 @@ Implementation notes / deviations from the design below:
   optimistic old-value guard against concurrent edits, decrypt-failure rows
   skipped permanently (no infinite loop) and logged, field + entity caches
   flushed in finished callback, recount at end tells the admin when the
-  source slot is retirable. Legacy accordion submits stay in sync with
-  registry slot 1; existing sites migrate via acuity_encrypt_update_1000().
+  source slot is retirable. The guided "Set keys" accordion reads/writes
+  registry slot 1 directly — there is no separate single-slot config.
 - Drush/bee rotate command: not built (no CLI on Windows dev box) — still
   in Future/Nice-to-have.
 

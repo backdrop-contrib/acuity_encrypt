@@ -1,0 +1,12 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.orig
+*.bak
+*~
+
+# Internal dev files — not shipped in the module
+CLAUDE.md
+TODO.md
+CHANGELOG.md
+.gitattributes

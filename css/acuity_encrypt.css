@@ -54,7 +54,6 @@
   background: #f0f0f0;
   color: #333;
 }
-
 /* Gap between the revealed value and the Hide chip (the value span
    precedes the button; when hidden it renders no gap at all). */
 .acuity-encrypt-wrap .acuity-encrypt-value {

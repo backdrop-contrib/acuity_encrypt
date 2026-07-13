@@ -433,7 +433,19 @@ function acuity_encrypt_field_formatter_view(string $_entity_type, object $_enti
     }
 
     // acuity_encrypt_reveal
+    // Honest at-rest indicator: only values the load hook actually
+    // decrypted (acuity_encrypt_decrypted item flag) get the mask —
+    // masking plaintext as "Encrypted" would give a false assurance.
+    // A value still plaintext in the DB (mid-migration) renders as normal
+    // visible text, exactly like a plain text field, so unmigrated rows
+    // are unmistakable. Only permitted viewers reach this branch; everyone
+    // else was masked above.
     $rendered = !empty($item['safe_value']) ? $item['safe_value'] : check_plain($value);
+
+    if (empty($item['acuity_encrypt_decrypted'])) {
+      $elements[$delta] = ['#markup' => $rendered];
+      continue;
+    }
 
     $elements[$delta] = [
       // The word "Encrypted" IS the toggle: click it to reveal, and it
@@ -518,6 +530,11 @@ function acuity_encrypt_field_attach_load(string $entity_type, array $entities, 
             $plain = acuity_encrypt_decrypt($item['value']);
             if ($plain !== FALSE) {
               $item['value'] = $plain;
+              // Mark the item as decrypted-from-ciphertext so the reveal
+              // formatter can distinguish it from a value that is still
+              // plaintext at rest (mid-migration) and must NOT be masked —
+              // masking plaintext would falsely suggest at-rest encryption.
+              $item['acuity_encrypt_decrypted'] = TRUE;
               // Recompute safe_value so the text formatter and other consumers
               // get plaintext, not the ciphertext that hook_field_load() saw.
               // Plain fields (no text processing, empty format) get

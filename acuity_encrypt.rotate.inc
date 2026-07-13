@@ -9,7 +9,7 @@
  * instance using the encrypt widget — a source key can only be retired
  * once its revisions are migrated too.
  *
- * Rows are updated with direct db_update() (not entity_save()) so entity
+ * Rows are updated with direct db_update() (not $entity->save()) so entity
  * timestamps, revisions, and hooks are untouched; caches are cleared in the
  * finished callback.
  */

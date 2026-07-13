@@ -13,6 +13,13 @@
         var $btn    = $(this);
         var keyUrl  = $wrap.data('key-url');
 
+        // Remember this button's masked-state label ("Encrypted" for field
+        // formatters, "Reveal key" on the admin panel) so hiding restores it
+        // instead of a hardcoded string.
+        if (!$btn.data('acuityMaskedLabel')) {
+          $btn.data('acuityMaskedLabel', $btn.text());
+        }
+
         if ($value.is(':hidden')) {
           // Key backup panel: the raw key is never in the page markup — fetch
           // it on demand the first time "Reveal key" is clicked.
@@ -50,7 +57,7 @@
           }
           $value.hide();
           $masked.removeAttr('aria-hidden').show();
-          $btn.text(Backdrop.t('Reveal'));
+          $btn.text($btn.data('acuityMaskedLabel'));
         }
       });
 

@@ -304,7 +304,7 @@ function acuity_encrypt_field_formatter_info(): array {
 function _acuity_encrypt_masked_element(string $module_path): array {
   return [
     '#markup' => '<span class="acuity-encrypt-masked acuity-encrypt-masked-text">'
-      . t('Encrypted text - If you have permission to view, click Reveal')
+      . t('Encrypted')
       . '</span>',
     '#attached' => ['css' => [$module_path . '/css/acuity_encrypt.css']],
   ];
@@ -332,7 +332,7 @@ function acuity_encrypt_field_formatter_settings_form(array $field, array $insta
   $element['hide_denied'] = [
     '#type'          => 'checkbox',
     '#title'         => t('Hide completely for viewers without the <em>view encrypted fields</em> permission'),
-    '#description'   => t('Output nothing at all instead of the "Encrypted text…" mask — the field, including its label, disappears for unauthorised viewers. In Views, combine with "No results behavior: Hide if empty" so the row leaves no gap.'),
+    '#description'   => t('Output nothing at all instead of the "Encrypted" mask — the field, including its label, disappears for unauthorised viewers. In Views, combine with "No results behavior: Hide if empty" so the row leaves no gap.'),
     '#default_value' => !empty($settings['hide_denied']),
   ];
   return $element;
@@ -436,15 +436,17 @@ function acuity_encrypt_field_formatter_view(string $_entity_type, object $_enti
     $rendered = !empty($item['safe_value']) ? $item['safe_value'] : check_plain($value);
 
     $elements[$delta] = [
+      // The word "Encrypted" IS the toggle: click it to reveal, and it
+      // becomes a small "Hide" after the value (the JS restores the
+      // original label on hide). Value span precedes the button so the
+      // control sits to the right of the revealed text.
       '#markup' => '<div class="acuity-encrypt-wrap">'
-        . '<span class="acuity-encrypt-masked acuity-encrypt-masked-text">'
-        . t('Encrypted text - If you have permission to view, click Reveal')
-        . '</span>'
-        . '&nbsp;<button type="button" class="acuity-encrypt-reveal-btn">'
-        . t('Reveal') . '</button>'
         . '<span class="acuity-encrypt-value" style="display:none">'
         . $rendered
         . '</span>'
+        . '<button type="button" class="acuity-encrypt-reveal-btn acuity-encrypt-chip" title="'
+        . t('Click to reveal') . '">'
+        . t('Encrypted') . '</button>'
         . '</div>',
       '#attached' => [
         'js'  => [$module_path . '/js/acuity_encrypt.js'],

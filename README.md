@@ -14,12 +14,13 @@ As a beta release, the encryption core, field widget/formatters, key slot manage
 * **Zero-downtime key rotation:** Add a new slot, set it active (new encryptions switch instantly; old data still decrypts), then run the Hard Rotate batch to re-encrypt everything - **including revisions** - under the new key. The slot table's live entry counts tell you exactly when the old key is safe to retire.
 * **Missing-key alarm:** If encrypted data exists whose key slot has no key configured, a prominent error banner appears on every admin page until it is restored.
 * **Keys never touch the database:** Three storage methods per slot - `settings.php` (recommended), private filesystem, or an external file outside the webroot. Keys never appear in CMI config exports or database dumps.
-* **Three fail-closed display formatters:** *Masked with reveal button* (shows "Encrypted text - If you have permission to view, click Reveal" with an in-page Reveal/Hide toggle), *plain decrypted text*, and *summary or trimmed* (a safe replacement for core's version, which would render raw ciphertext to unauthorised viewers). All three render the mask for anyone without the `view encrypted fields` permission - or, with the per-display "Hide completely" setting, render nothing at all. Unauthorised users' edits preserve the encrypted value untouched.
+* **Three fail-closed display formatters:** *Masked with reveal button* (shows a clickable "Encrypted" word that toggles the value in-page, with a "Hide" control while revealed), *plain decrypted text*, and *summary or trimmed* (a safe replacement for core's version, which would render raw ciphertext to unauthorised viewers). All three render the mask for anyone without the `view encrypted fields` permission - or, with the per-display "Hide completely" setting, render nothing at all. Unauthorised users' edits preserve the encrypted value untouched.
 * **WYSIWYG support:** Long text fields retain full CKEditor support behind a "Reveal to edit" overlay mask.
 * **Encrypted-length guard:** Encryption inflates storage (~1.34 × plaintext + ~45 characters). The widget shows the effective limit, caps input, and byte-validates on submit; programmatic saves that would overflow the column are blocked with a clear exception instead of silently truncating into undecryptable data.
 * **Permission-gated decryption:** Values decrypt on load only for users with `view encrypted fields`. For those users Views, tokens, and Rules receive plaintext automatically; for everyone else the ciphertext stays in place - this module's widget and formatters render a mask, and core formatters render harmless ciphertext (fail closed). Unprivileged machine contexts (cron search indexing, anonymous-triggered emails) therefore see ciphertext: encrypted fields are deliberately **not searchable**, and no plaintext ever reaches the search index.
 * **No plaintext in the display/render caches:** Persistent entity/field caching is automatically disabled for any bundle containing an encrypted field, so decrypted values are never written to `cache_entity_*` / `cache_field` database tables when content is *viewed* - a database dump exposes ciphertext only. (One known, narrow exception is tracked for a future release: an authorised user's *edit* form can be written to the `cache_form` table if that form also contains an AJAX element such as a file/image field. See "Threat model" below.)
 * **VBO bulk encryption:** Views Bulk Operations action to encrypt existing plain text values in one batch.
+* **VBO field copy (safety net):** Views Bulk Operations action to copy one text field's values into another in batch - back up a plaintext field to a temporary field before encrypting the original, and restore in the other direction if needed by swapping source and destination.
 * **Public API:** `acuity_encrypt_encrypt()` / `acuity_encrypt_decrypt()`, plus `_with_key()` variants for caller-supplied 32-byte keys (used by `acuity_secure_link` for token-derived per-link encryption).
 * **GDPR / UK DPA / Data (Use and Access) Act (DUAA):** Database dumps without the key expose no sensitive personal data.
 * **Backdrop Native:** Built exclusively for Backdrop CMS using strict PHP 8.0+ standards and Backdrop APIs throughout.
@@ -29,7 +30,7 @@ As a beta release, the encryption core, field widget/formatters, key slot manage
 - Backdrop CMS 1.x
 - PHP 8.0+ (While the code may technically function with PHP 7.4 at this time, we strictly require PHP 8.0+ and will not address issues related to older PHP versions.)
 - PHP `openssl` extension (enabled by default in most PHP installs)
-- Views Bulk Operations module (optional - only needed for the bulk encryption action)
+- Views Bulk Operations module (optional - only needed for the bulk encryption and field copy actions)
 
 ## Installation
 
@@ -62,7 +63,7 @@ Pick any field holding data you would want encrypted - an API token, a licence k
 
 1. On a copy of your site, pick an existing plaintext field - here, `field_secret` on some content type.
 2. Add a **second** field, e.g. `field_secret_enc`, and set its widget to **Acuity Encrypt (masked text)** under Manage fields. Configure a key first if you have not already (see Configuration).
-3. Copy the values across. For a few rows, just open each node and paste the value into the new field and save. To do the whole set at once, run a short script (via the Devel module's *Execute PHP*, or `bee php-script`):
+3. Copy the values across. The easiest bulk method is the included VBO action **Acuity Encrypt: copy field value to another field**: create a View of the content type with a Views Bulk Operations field, select the rows, pick `field_secret` as the source and `field_secret_enc` as the destination, and run it. (Leave *Overwrite* unticked - rows whose destination already holds a value are skipped, so re-running is safe.) For a few rows you can simply open each node and paste the value into the new field and save, or run a short script (via the Devel module's *Execute PHP*, or `bee php-script`):
    ```php
    foreach (node_load_multiple(FALSE, array('type' => 'YOUR_TYPE')) as $node) {
      $lang = LANGUAGE_NONE;
@@ -74,7 +75,7 @@ Pick any field holding data you would want encrypted - an API token, a licence k
    }
    ```
 
-   The copy method does not matter - encryption is not tied to how the value arrives. It happens in `hook_field_attach_presave()` when the entity is saved, so *anything* that writes the plaintext into the encrypted-widget field and then saves the node will encrypt it: manual edits, the script above, **VBO** (for example with a Rules component that copies `field_secret` into `field_secret_enc` on each selected entity), Feeds, or Migrate. Use whichever you are comfortable with.
+   The copy method does not matter - encryption is not tied to how the value arrives. It happens in `hook_field_attach_presave()` when the entity is saved, so *anything* that writes the plaintext into the encrypted-widget field and then saves the node will encrypt it: the bundled copy action, manual edits, the script above, a VBO + Rules component, Feeds, or Migrate. Use whichever you are comfortable with.
 4. **Verify - this is the whole point:**
    * Look in the database (Adminer / phpMyAdmin, or `bee sql-query`) at table `field_data_field_secret_enc`: the value column now begins with `enc1:` (ciphertext), while your original `field_data_field_secret` is still plaintext. The same value, encrypted and not, side by side.
    * View a node with the *masked with reveal* formatter and click **Reveal** - the decrypted value matches the original plaintext exactly.
@@ -84,13 +85,31 @@ Pick any field holding data you would want encrypted - an API token, a licence k
 
 **When you are satisfied**
 
-For the real switch you normally do not keep two fields - you encrypt the field in place:
+For the real switch you normally do not keep two fields - you encrypt the field in place, with a temporary plaintext backup as your safety net:
 
-1. Set the existing field's widget to **Acuity Encrypt (masked text)**.
-2. Create a View of that content type with the **Views Bulk Operations** field, select all rows, and run **Acuity Encrypt: encrypt existing field values**. This resaves each entity, encrypting existing plaintext in place (already-encrypted values are skipped).
-3. Confirm `enc1:` ciphertext in the database, then **securely dispose of the plaintext**: delete any temporary side-by-side field you added, and remember that **old database backups still contain the plaintext** - retire or rotate them per your data-retention policy.
+1. Create a backup field of the **same type** (e.g. `field_secret_saved`) with an ordinary text widget, and run the VBO action **Acuity Encrypt: copy field value to another field** with `field_secret` as source and `field_secret_saved` as destination. Your plaintext now survives whatever happens next.
+2. Set the existing field's widget to **Acuity Encrypt (masked text)**.
+3. In the same View, run **Acuity Encrypt: encrypt existing field values**. This resaves each entity, encrypting existing plaintext in place (already-encrypted values are skipped).
+4. Confirm `enc1:` ciphertext in `field_data_field_secret`, reveal a few values, and compare them against the backup field. If anything went wrong, restore by running the copy action in reverse (`field_secret_saved` → `field_secret`, with *Overwrite* ticked) - the restored values are re-encrypted on save.
+5. When you are confident, **securely dispose of the plaintext**: delete the backup field, and remember that **old database backups still contain the plaintext** - retire or rotate them per your data-retention policy.
 
-> Note: the **bundled** VBO action (*Acuity Encrypt: encrypt existing field values*) only encrypts a field **in place** - it does not copy between fields. To copy a plaintext field into a separate encrypted field, use any per-entity field-copy method (a VBO + Rules component, the script in step 3, or manual edits) - the value is encrypted on save regardless. Keeping the copy a deliberate step means you stay in control of exactly where secrets are written.
+> Note: the copy action refuses to copy ciphertext. If you run it on an encrypted source as a user without the `view encrypted fields` permission (or with the key missing), affected entities are skipped and logged rather than filling your backup field with unreadable ciphertext.
+
+## Views Bulk Operations Actions
+
+Two entity actions ship with this module (both need the Views Bulk Operations module and a View with a VBO field):
+
+**Acuity Encrypt: encrypt existing field values** - resaves each selected entity so the presave hook encrypts any plaintext in fields using the Acuity Encrypt widget. Already-encrypted values are skipped, and fields with ordinary widgets are never touched. Use it after switching an existing field's widget to encrypt its historical data in place.
+
+**Acuity Encrypt: copy field value to another field** - copies one text field's values into another for every selected row. Designed as the safety net around encryption migrations (see the walkthrough above), but it is a general field-to-field copy:
+
+* **Source and destination** dropdowns list text fields that exist on the content types of the rows you actually selected - a View filtered to one content type offers only that type's fields. Both fields must be the same field type (`text`, `text_long`, or `text_with_summary`); create the backup field with the same type as the original.
+* **Overwrite** checkbox (off by default): rows whose destination already holds a value are skipped, so re-running the backup is always safe. Tick it for restores.
+* **Direction-agnostic:** backup (plaintext → plaintext) and restore (backup → encrypted field) are the same action with the fields swapped - whether a value ends up encrypted is decided by the destination field's widget when the entity saves.
+* **Skips rather than corrupts** (each skip logged to the watchdog): a source value still in ciphertext (you lack `view encrypted fields`, or the key is missing), a value too long for a single-line destination column (encryption overhead included), or either field missing from that row's content type.
+* Copies the value, summary, and text format; values beyond the destination's number-of-values limit are dropped with a warning.
+
+Both actions update each saved entity's *changed* timestamp. Neither can encrypt a narrower set than "every encrypt-widget field on the entity" - any save encrypts them all by design, so per-field migration control comes from switching one field's widget at a time.
 
 ## Key Rotation
 

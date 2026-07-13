@@ -36,6 +36,31 @@
   border-color: #888;
 }
 
+/* Chip variant (field formatters): the word "Encrypted" is itself the
+   toggle — text-like, dotted underline as the click affordance. */
+.acuity-encrypt-reveal-btn.acuity-encrypt-chip {
+  border: none;
+  margin-left: 0;
+  padding: 1px 4px;
+  font-family: inherit;
+  font-style: italic;
+  font-size: 0.9em;
+  color: #777;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.acuity-encrypt-reveal-btn.acuity-encrypt-chip:hover {
+  background: #f0f0f0;
+  color: #333;
+}
+
+/* Gap between the revealed value and the Hide chip (the value span
+   precedes the button; when hidden it renders no gap at all). */
+.acuity-encrypt-wrap .acuity-encrypt-value {
+  margin-right: 6px;
+}
+
 /* ── Edit widget: masked field + reveal button ─────────────────────────────── */
 
 .acuity-encrypt-widget-wrap {
